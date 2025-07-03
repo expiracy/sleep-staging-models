@@ -96,8 +96,6 @@ python train_crossattn_gen.py --config configs/config_crossattn_generated.yaml -
 
 ## 📝 Citation
 
-If you find this work useful for your research, please kindly cite these by:
-
 If you find this work useful, please cite our paper:
 
 ```bibtex
@@ -113,28 +111,14 @@ If you find this work useful, please cite our paper:
 
 ## 🤝 Acknowledgments
 
-- MESA Sleep Study dataset [14]
-- SleepPPG-Net baseline architecture [9]
-- RDDM for synthetic ECG generation [11]
+- MESA Sleep Study dataset 
+- SleepPPG-Net baseline architecture 
+- RDDM for synthetic ECG generation 
 
 ## 📜 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 📧 Contact
-
-For questions or collaborations, please:
-- Open an issue on GitHub
-- Email: [corresponding.author@email.com]
-
-## 🔮 Future Work
-
-- Investigate other auxiliary modalities (e.g., EEG)
-- Evaluate on additional sleep staging datasets
-- Develop sleep-specific synthetic ECG generation
-- Explore lightweight architectures for edge deployment
-
----
 
 <p align="center">
 <i>Advancing accessible sleep monitoring through innovative computational approaches</i>
