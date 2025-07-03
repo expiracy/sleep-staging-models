@@ -23,7 +23,7 @@ This repository contains the implementation of our pilot study on improving PPG-
 - **SleepPPG-Net**: Processes 10-hour PPG recordings through residual convolutional blocks
 - We have replicated the code of SleepPPG-Net
 <div align="center">
-  <img src="DavyWJW/sleep-staging-models/edit/main/single-ppg.jpg" alt="Single-Stream Architecture" width="600"/>
+  <img src="DavyWJW/sleep-staging-models/blob/main/single-ppg.jpg" alt="Single-Stream Architecture" width="600"/>
 </div>
 ### Dual-Stream Models
 1. **PPG + Augmented PPG**: Combines clean and noise-augmented PPG signals
@@ -31,7 +31,7 @@ This repository contains the implementation of our pilot study on improving PPG-
 3. **PPG + Real ECG**: Upper bound performance using actual ECG recordings
 
 <div align="center">
-  <img src="DavyWJW/sleep-staging-models/edit/main/dual.jpg" alt="Dual-Stream Architecture" width="600"/>
+  <img src="DavyWJW/sleep-staging-models/blob/main/dual.jpg" alt="Dual-Stream Architecture" width="600"/>
 </div>
 
 ## 🚀 Quick Start
