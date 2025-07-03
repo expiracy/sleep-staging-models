@@ -1,7 +1,3 @@
-"""
-多模态睡眠分期训练脚本 - PPG-Only版本
-与SleepPPG-Net测试集对齐
-"""
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -30,18 +26,18 @@ class MultiModalTrainer:
         self.device = torch.device(f'cuda:{config["gpu"]["device_id"]}' if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {self.device}")
 
-        # 创建输出目录
+
         self.setup_directories()
 
-        # 初始化tensorboard
+
         self.writer = SummaryWriter(self.log_dir)
 
-        # 保存配置
+
         with open(os.path.join(self.checkpoint_dir, 'config.json'), 'w') as f:
             json.dump(config, f, indent=2)
 
     def setup_directories(self):
-        """创建必要的目录"""
+
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         model_name = f"{self.config['model_type']}_{timestamp}"
         if self.run_id is not None:
@@ -57,7 +53,7 @@ class MultiModalTrainer:
         os.makedirs(self.results_dir, exist_ok=True)
 
     def create_model(self):
-        """创建模型"""
+
         if self.config['model_type'] == 'ppg_only':
             model = SleepPPGNet()
         elif self.config['model_type'] == 'ppg_with_noise':
@@ -75,48 +71,48 @@ class MultiModalTrainer:
         return model.to(self.device)
 
     def calculate_class_weights(self, train_dataset):
-        """按照SleepPPG-Net的方式计算类别权重"""
+
         print("\nCalculating class weights...")
 
-        # 收集训练集中的标签分布
+
         all_labels = []
 
-        # 采样部分数据来计算权重
+
         sample_size = min(len(train_dataset), 50)
 
         for idx in tqdm(range(sample_size), desc="Sampling labels"):
-            # 根据数据集类型处理不同的返回值
+
             data = train_dataset[idx]
-            if len(data) == 2:  # PPG-only数据集
+            if len(data) == 2:  
                 _, labels = data
-            else:  # 多模态数据集
+            else:  
                 _, _, labels = data
 
-            # 过滤掉-1
+
             valid_labels = labels[labels != -1]
             all_labels.extend(valid_labels.numpy().tolist())
 
-        # 统计类别分布
+
         label_counts = Counter(all_labels)
 
-        # 确保所有类别都存在
+
         class_counts = []
         for i in range(4):
             class_counts.append(label_counts.get(i, 1))
 
         total_samples = sum(class_counts)
 
-        # 打印分布
+ 
         print(f"\nLabel distribution (from {sample_size} subjects):")
         stage_names = ['Wake', 'Light', 'Deep', 'REM']
         for i, count in enumerate(class_counts):
             percentage = count / total_samples * 100
             print(f"  {stage_names[i]} (class {i}): {count} samples ({percentage:.2f}%)")
 
-        # 按照SleepPPG-Net方式计算权重：1/count
+
         class_weights = torch.tensor([1.0 / count for count in class_counts], dtype=torch.float32)
 
-        # 归一化权重
+
         class_weights = class_weights / class_weights.sum() * len(class_weights)
 
         print(f"\nClass weights: {class_weights}")
@@ -124,19 +120,19 @@ class MultiModalTrainer:
         return class_weights.to(self.device)
 
     def train_epoch(self, dataloader, model, device, optimizer, criterion):
-        """训练一个epoch"""
+
         model.train()
         running_loss = 0.0
         total = 0
 
         for batch_idx, batch in enumerate(tqdm(dataloader, desc="Training")):
-            # 根据batch长度判断数据类型
-            if len(batch) == 2:  # PPG-only数据集
+
+            if len(batch) == 2:  
                 ppg, labels = batch
                 ppg = ppg.to(device)
                 labels = labels.to(device)
                 outputs = model(ppg)
-            else:  # 多模态数据集
+            else:  
                 ppg, ecg, labels = batch
                 ppg = ppg.to(device)
                 ecg = ecg.to(device)
@@ -145,7 +141,7 @@ class MultiModalTrainer:
 
             optimizer.zero_grad()
 
-            # 调整输出维度
+
             outputs = outputs.permute(0, 2, 1)  # (B, 1200, 4)
             loss = criterion(
                 outputs.reshape(-1, outputs.shape[-1]),
@@ -154,19 +150,19 @@ class MultiModalTrainer:
 
             loss.backward()
 
-            # 梯度裁剪
+
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
             optimizer.step()
 
-            # 统计有效标签
+
             mask = labels != -1
             valid_labels = labels[mask]
 
             total += valid_labels.size(0)
             running_loss += loss.item() * valid_labels.size(0)
 
-            # 定期清理GPU缓存
+
             if batch_idx % 10 == 0:
                 torch.cuda.empty_cache()
 
@@ -178,29 +174,29 @@ class MultiModalTrainer:
         return epoch_loss
 
     def validate(self, dataloader, model, device, criterion):
-        """验证 - 支持per-patient和overall指标计算"""
+
         model.eval()
         running_loss = 0.0
         correct = 0
         total = 0
 
-        # 用于overall计算
+
         all_preds = []
         all_labels = []
 
-        # 用于per-patient计算
+
         patient_predictions = defaultdict(list)
         patient_labels = defaultdict(list)
 
         with torch.no_grad():
             for batch_idx, batch in enumerate(tqdm(dataloader, desc="Validation")):
-                # 根据batch长度判断数据类型
-                if len(batch) == 2:  # PPG-only数据集
+
+                if len(batch) == 2:  
                     ppg, labels = batch
                     ppg = ppg.to(device)
                     labels = labels.to(device)
                     outputs = model(ppg)
-                else:  # 多模态数据集
+                else:  
                     ppg, ecg, labels = batch
                     ppg = ppg.to(device)
                     ecg = ecg.to(device)
@@ -213,12 +209,12 @@ class MultiModalTrainer:
                     labels.reshape(-1)
                 ).mean()
 
-                # 处理每个batch中的样本
+
                 batch_size = outputs.shape[0]
                 for i in range(batch_size):
                     patient_idx = batch_idx * dataloader.batch_size + i
 
-                    # 获取当前患者的有效预测和标签
+
                     mask = labels[i] != -1
                     if mask.any():
                         patient_outputs = outputs[i][mask]
@@ -226,11 +222,11 @@ class MultiModalTrainer:
 
                         _, predicted = patient_outputs.max(1)
 
-                        # 存储per-patient数据
+
                         patient_predictions[patient_idx].extend(predicted.cpu().numpy())
                         patient_labels[patient_idx].extend(patient_labels_i.cpu().numpy())
 
-                        # 同时保存到overall列表
+ 
                         all_preds.extend(predicted.cpu().numpy())
                         all_labels.extend(patient_labels_i.cpu().numpy())
 
@@ -241,7 +237,7 @@ class MultiModalTrainer:
                 gc.collect()
                 torch.cuda.empty_cache()
 
-        # 计算per-patient指标
+
         patient_accuracies = []
         patient_kappas = []
         patient_f1s = []
@@ -252,7 +248,7 @@ class MultiModalTrainer:
                                       np.array(patient_labels[patient_idx]))
                 patient_accuracies.append(patient_acc)
 
-                # 只有当患者有多个类别时才计算kappa
+
                 unique_labels = np.unique(patient_labels[patient_idx])
                 if len(unique_labels) > 1:
                     patient_kappa = cohen_kappa_score(patient_labels[patient_idx],
@@ -264,14 +260,13 @@ class MultiModalTrainer:
                                       average='weighted')
                 patient_f1s.append(patient_f1)
 
-        # 计算指标
-        # Overall指标（原来的方式）
+
         epoch_loss = running_loss / len(all_labels) if all_labels else 0
         overall_accuracy = np.mean(np.array(all_preds) == np.array(all_labels)) if all_labels else 0
         overall_kappa = cohen_kappa_score(all_labels, all_preds) if all_labels else 0
         overall_f1 = f1_score(all_labels, all_preds, average='weighted') if all_labels else 0
 
-        # Per-patient median指标
+
         median_accuracy = np.median(patient_accuracies) if patient_accuracies else 0
         median_kappa = np.median(patient_kappas) if patient_kappas else 0
         median_f1 = np.median(patient_f1s) if patient_f1s else 0
