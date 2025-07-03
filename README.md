@@ -72,7 +72,7 @@ python extract_mesa_data.py
 ### Train Single-Stream Baseline (SleepPPG-Net)
 
 ```bash
-python train_cloud.py --config configs/config_cloud.yaml --model ppg_only --runs 5
+python train_ppg_only.py --config configs/config_cloud.yaml --model ppg_only --runs 5
 ```
 
 ### Train Dual-Stream Models
