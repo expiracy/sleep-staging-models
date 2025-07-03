@@ -114,6 +114,34 @@ If you find this work useful, please cite our paper:
   doi={10.1145/XXXXXXX.XXXXXXX}
 }
 ```
+Further Reading:
+
+SleepPPG-Net: A deep learning algorithm for robust sleep staging from continuous photoplethysmography
+```bibtex
+@article{kotzen2022sleepppg,
+  title={SleepPPG-Net: A deep learning algorithm for robust sleep staging from continuous photoplethysmography},
+  author={Kotzen, Kevin and Charlton, Peter H and Salabi, Sharon and Amar, Lea and Landesberg, Amir and Behar, Joachim A},
+  journal={IEEE Journal of Biomedical and Health Informatics},
+  volume={27},
+  number={2},
+  pages={924--932},
+  year={2022},
+  publisher={IEEE}
+}
+```
+
+RDDM: Region-disentangled diffusion model for high-fidelity ppg-to-ecg translation
+```bibtex
+@inproceedings{shome2024region,
+  title={Region-disentangled diffusion model for high-fidelity ppg-to-ecg translation},
+  author={Shome, Debaditya and Sarkar, Pritam and Etemad, Ali},
+  booktitle={Proceedings of the AAAI conference on artificial intelligence},
+  volume={38},
+  number={13},
+  pages={15009--15019},
+  year={2024}
+}
+```
 
 ## 🤝 Acknowledgments
 
