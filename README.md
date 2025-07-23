@@ -107,7 +107,7 @@ If you find this work useful, please cite our paper:
 ```bibtex
 @inproceedings{ppg_sleep_staging_2025,
   title={On Improving PPG-Based Sleep Staging: A Pilot Study},
-  author={[Author Names]},
+  author={Jiawei Wang, Yu Guan, Chen Chen, Ligang Zhou, Laurence T. Yang, Sai Gu},
   booktitle={Conference Name},
   year={2025},
   pages={1--4},
