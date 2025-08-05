@@ -108,10 +108,10 @@ If you find this work useful, please cite our paper:
 @inproceedings{ppg_sleep_staging_2025,
   title={On Improving PPG-Based Sleep Staging: A Pilot Study},
   author={Jiawei Wang, Yu Guan, Chen Chen, Ligang Zhou, Laurence T. Yang, Sai Gu},
-  booktitle={Conference Name},
+  booktitle={Companion of the 2025 ACM International Joint Conference on Pervasive and Ubiquitous Computing},
   year={2025},
   pages={1--4},
-  doi={10.1145/XXXXXXX.XXXXXXX}
+  doi={https://doi.org/10.1145/3714394.3756336}
 }
 ```
 Further Reading:
