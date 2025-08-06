@@ -115,6 +115,8 @@ If you find this work useful, please cite our paper:
   doi={https://doi.org/10.1145/3714394.3756336}
 }
 ```
+Please read our paper on arxiv here: https://arxiv.org/abs/2508.02689
+
 Further Reading:
 
 SleepPPG-Net: A deep learning algorithm for robust sleep staging from continuous photoplethysmography
