@@ -534,8 +534,8 @@ class MESADataExtractor:
 
 def main():
 
-    MESA_PATH = "G:/mesa"  
-    OUTPUT_PATH = "F:/python_project/mesa-x" 
+    MESA_PATH = "../../data/mesa"  
+    OUTPUT_PATH = "../../data/mesa_extracted" 
 
 
     extractor = MESADataExtractor(MESA_PATH, OUTPUT_PATH, require_ecg=False)
