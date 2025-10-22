@@ -20,12 +20,16 @@ from multimodal_dataset_aligned import get_dataloaders
 
 
 class MultiModalTrainer:
-    def __init__(self, config, run_id=None):
+    def __init__(self, config, run_id=None, force_cpu=False):
         self.config = config
         self.run_id = run_id
-        self.device = torch.device(f'cuda:{config["gpu"]["device_id"]}' if torch.cuda.is_available() else 'cpu')
-        print(f"Using device: {self.device}")
-
+        
+        if force_cpu:
+            self.device = torch.device('cpu')
+            print(f"Using device: {self.device} (forced by --cpu flag)")
+        else:
+            self.device = torch.device(f'cuda:{config["gpu"]["device_id"]}' if torch.cuda.is_available() else 'cpu')
+            print(f"Using device: {self.device}")
 
         self.setup_directories()
 
@@ -162,12 +166,14 @@ class MultiModalTrainer:
             total += valid_labels.size(0)
             running_loss += loss.item() * valid_labels.size(0)
 
-
+            # 清理内存 - 只在GPU上执行
             if batch_idx % 10 == 0:
-                torch.cuda.empty_cache()
+                if torch.cuda.is_available() and self.device.type == 'cuda':
+                    torch.cuda.empty_cache()
 
         gc.collect()
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available() and self.device.type == 'cuda':
+            torch.cuda.empty_cache()
 
         epoch_loss = running_loss / total if total > 0 else 0
 
@@ -235,7 +241,8 @@ class MultiModalTrainer:
                         running_loss += loss.item() * patient_labels_i.numel()
 
                 gc.collect()
-                torch.cuda.empty_cache()
+                if torch.cuda.is_available() and device.type == 'cuda':
+                    torch.cuda.empty_cache()
 
 
         patient_accuracies = []
@@ -393,7 +400,7 @@ class MultiModalTrainer:
 
         # 学习率调度器
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='max', factor=0.7, patience=5, verbose=True
+            optimizer, mode='max', factor=0.7, patience=5,
         )
 
         # 训练设置
@@ -584,6 +591,8 @@ def parse_args():
                         default='both', help='Which model(s) to train')
     parser.add_argument('--runs', type=int, default=None,
                         help='Number of runs (overrides config)')
+    parser.add_argument('--cpu', action='store_true',
+                        help='Force training to use CPU instead of GPU')
     return parser.parse_args()
 
 
@@ -625,7 +634,7 @@ def main():
         # 设置随机种子
         torch.manual_seed(42 + run)
         np.random.seed(42 + run)
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and not args.cpu:
             torch.cuda.manual_seed(42 + run)
 
         # 训练每个模型
@@ -642,14 +651,15 @@ def main():
                 model_config['fusion_strategy'] = config['model']['real_ecg']['fusion_strategy']
 
             # 创建训练器并训练
-            trainer = MultiModalTrainer(model_config, run_id=run if num_runs > 1 else None)
+            trainer = MultiModalTrainer(model_config, run_id=run if num_runs > 1 else None, force_cpu=args.cpu)
             results = trainer.train()
 
             # 保存结果
             all_results[model_type].append(results)
 
             # 清理GPU内存
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available() and not args.cpu:
+                torch.cuda.empty_cache()
             gc.collect()
 
     # 计算并打印最终统计结果
