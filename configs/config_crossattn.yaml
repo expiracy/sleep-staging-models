@@ -1,8 +1,8 @@
 # Cross-Attention
 data:
-  ppg_file: "../../data/mesa_ppg_with_labels.h5"
-  ecg_file: "../../data/mesa_real_ecg.h5"
-  index_file: "../../data/mesa_subject_index.h5"
+  ppg_file: "../../data/mesa_extracted/mesa_ppg_with_labels.h5"
+  ecg_file: "../../data/mesa_extracted/mesa_real_ecg.h5"
+  index_file: "../../data/mesa_extracted/mesa_subject_index.h5"
   num_workers: 4
 
 training:

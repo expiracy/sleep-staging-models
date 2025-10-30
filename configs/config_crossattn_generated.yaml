@@ -19,7 +19,7 @@ model:
 
 output:
   save_dir: "./outputs"
-  save_frequency: 5
+  save_frequency: 1
 
 
 use_amp: true

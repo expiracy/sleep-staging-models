@@ -21,9 +21,9 @@ noise_config:
 
 # Data configuration
 data:
-  ppg_file: "../../data/mesa_ppg_with_labels.h5"
-  ecg_file: "../../data/mesa_real_ecg.h5"
-  index_file: "../../data/mesa_subject_index.h5"
+  ppg_file: "../../mesa_extracted/data/mesa_ppg_with_labels.h5"
+  ecg_file: "../../mesa_extracted/data/mesa_real_ecg.h5"
+  index_file: "../../mesa_extracted/data/mesa_subject_index.h5"
   batch_size: 2
   num_workers: 4
 
