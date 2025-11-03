@@ -43,6 +43,6 @@ gpu:
 
 # Output configuration
 output:
-  save_dir: "./outputs"
+  save_dir: "../../outputs"
   save_frequency: 5
   save_intermediate: true

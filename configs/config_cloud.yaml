@@ -34,7 +34,7 @@ model:
 
 output:
 
-  save_dir: "./outputs"
+  save_dir: "../../outputs"
   save_frequency: 5
 
 
