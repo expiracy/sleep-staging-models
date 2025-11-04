@@ -225,13 +225,13 @@ class SleepStageInference:
         else:
             return predictions
     
-    def predict_from_h5_subject(self, h5_file_path, subject_id, return_probabilities=False):
+    def predict_from_h5_subject(self, h5_file_path, h5_index_file_path, subject_id, return_probabilities=False):
         """
         Load and predict for a subject from H5 file
         
         Args:
             h5_file_path: Path to H5 file with PPG data
-            subject_id: Subject ID to load (string, e.g., 'mesa-sleep-0002')
+            subject_id: Subject ID to load (e.g. 1)
             return_probabilities: If True, return class probabilities
         
         Returns:
@@ -244,20 +244,10 @@ class SleepStageInference:
         
         print(f"\nLoading subject {subject_id} from {h5_file_path}")
         
-        # Load index file to get subject position
-        index_file = h5_file_path.replace('mesa_ppg_with_labels.h5', 'mesa_subject_index.h5')
-        
         # Load subject indices
-        with h5py.File(index_file, 'r') as f:
+        with h5py.File(h5_index_file_path, 'r') as f:
             # Convert subject_id to the format used in the HDF5 file
-            if isinstance(subject_id, int):
-                subject_key = f'{subject_id:04d}'
-            else:
-                # If it's a string, extract just the number part
-                if 'mesa-sleep-' in subject_id:
-                    subject_key = subject_id.split('-')[-1]
-                else:
-                    subject_key = subject_id
+            subject_key = f'{subject_id:04d}'
             
             # Check if subject exists
             if f'subjects/{subject_key}' not in f:
@@ -292,6 +282,7 @@ class SleepStageInference:
         if self.monitor_resources:
             self.metrics['total_time'] = time.time() - total_start_time
             self.metrics['final_memory_mb'] = self.process.memory_info().rss / 1024 / 1024
+            self.print_resource_metrics()
         
         return result
     
@@ -445,20 +436,23 @@ def main():
     """Main inference script"""
     parser = argparse.ArgumentParser(description='Sleep Stage Inference')
     parser.add_argument('--checkpoint', type=str, required=True,
-                       help='Path to model checkpoint')
+                        help='Path to model checkpoint')
     parser.add_argument('--model_type', type=str, default='ppg_only',
-                       choices=['ppg_only', 'ppg_unfiltered', 'crossattn_ecg'],
-                       help='Type of model')
+                        choices=['ppg_only', 'ppg_unfiltered', 'crossattn_ecg'],
+                        help='Type of model')
     parser.add_argument('--data_file', type=str,
                        default='../../data/mesa_extracted/mesa_ppg_with_labels.h5',
-                       help='Path to H5 data file')
+                        help='Path to H5 data file')
+    parser.add_argument('--data_index_file', type=str,
+                        default='../../data/mesa_extracted/mesa_subject_index.h5',
+                        help='Path to H5 data index file')
     parser.add_argument('--subject_id', type=int, default=1,
-                       help='Subject ID to test')
+                        help='Subject ID to test')
     parser.add_argument('--output_dir', type=str, default='../../outputs/inference_results',
-                       help='Directory to save results')
+                        help='Directory to save results')
     parser.add_argument('--device', type=str, default='cuda',
-                       choices=['cuda', 'cpu'],
-                       help='Device to run inference on')
+                        choices=['cuda', 'cpu'],
+                        help='Device to run inference on')
     
     args = parser.parse_args()
     
@@ -477,6 +471,7 @@ def main():
     print(f"\nRunning inference on subject {args.subject_id}...")
     predictions, true_labels, probabilities = inference.predict_from_h5_subject(
         args.data_file,
+        args.data_index_file,
         args.subject_id,
         return_probabilities=True
     )
@@ -484,9 +479,6 @@ def main():
     # Compute metrics
     metrics = inference.compute_metrics(predictions, true_labels)
     inference.print_metrics(metrics)
-    
-    # Print resource usage metrics
-    inference.print_resource_metrics()
     
     # Visualize results
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
