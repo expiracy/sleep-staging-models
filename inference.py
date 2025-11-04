@@ -106,9 +106,9 @@ class SleepStageInference:
         if self.model_type == 'ppg_only':
             model = SleepPPGNet()
         elif self.model_type == 'ppg_unfiltered':
-            model = PPGUnfilteredCrossAttention(n_classes=4)
+            model = PPGUnfilteredCrossAttention()
         elif self.model_type == 'crossattn_ecg':
-            model = ImprovedMultiModalSleepNet(n_classes=4, fusion_strategy='attention')
+            model = ImprovedMultiModalSleepNet()
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
         
@@ -142,53 +142,44 @@ class SleepStageInference:
             'val_acc': checkpoint.get('best_val_acc', 'Unknown')
         }
     
-    def preprocess_ppg(self, ppg_data, expected_length=1228800):
+    def _preprocess_ppg(self, ppg_data):
         """
         Preprocess PPG data for model input
         
         Args:
-            ppg_data: Raw PPG signal (numpy array or tensor)
-            expected_length: Expected length (default: 1228800 for 10 hours at 34Hz)
+            ppg_data: Raw PPG signal as numpy array (continuous signal)
         
         Returns:
-            Preprocessed PPG tensor ready for model input
+            ppg_tensor: Preprocessed tensor ready for model input
         """
-        # Convert to numpy if needed
-        if torch.is_tensor(ppg_data):
-            ppg_data = ppg_data.cpu().numpy()
+        # Ensure ppg_data is a numpy array
+        if not isinstance(ppg_data, np.ndarray):
+            ppg_data = np.array(ppg_data)
         
-        # Flatten if needed
-        if ppg_data.ndim > 1:
-            ppg_data = ppg_data.reshape(-1)
+        # Reshape to windows if needed
+        # Expected shape: (batch, channels, samples) or (batch, samples)
+        # For PPG models, we typically have (1, 1, N) where N is the signal length
         
-        # Handle length mismatch
-        if len(ppg_data) < expected_length:
-            # Pad with zeros
-            pad_length = expected_length - len(ppg_data)
-            ppg_data = np.pad(ppg_data, (0, pad_length), mode='constant')
-            print(f"Warning: PPG data padded from {len(ppg_data)} to {expected_length}")
-        elif len(ppg_data) > expected_length:
-            # Truncate
-            ppg_data = ppg_data[:expected_length]
-            print(f"Warning: PPG data truncated from {len(ppg_data)} to {expected_length}")
+        # Convert to tensor
+        ppg_tensor = torch.from_numpy(ppg_data).float()
         
-        # Normalize (z-score normalization)
-        ppg_mean = np.mean(ppg_data)
-        ppg_std = np.std(ppg_data)
-        if ppg_std > 0:
-            ppg_data = (ppg_data - ppg_mean) / ppg_std
+        # Add batch and channel dimensions if not present
+        if ppg_tensor.dim() == 1:
+            ppg_tensor = ppg_tensor.unsqueeze(0).unsqueeze(0)  # (1, 1, N)
+        elif ppg_tensor.dim() == 2:
+            ppg_tensor = ppg_tensor.unsqueeze(1)  # (B, 1, N)
         
-        # Convert to tensor and add batch and channel dimensions
-        ppg_tensor = torch.FloatTensor(ppg_data).unsqueeze(0).unsqueeze(0)  # (1, 1, length)
+        # Move to device
+        ppg_tensor = ppg_tensor.to(self.device)
         
-        return ppg_tensor.to(self.device)
-    
+        return ppg_tensor
+
     def predict(self, ppg_data, return_probabilities=False):
         """
         Perform sleep stage prediction
         
         Args:
-            ppg_data: Raw PPG signal
+            ppg_data: Raw PPG signal (numpy array)
             return_probabilities: If True, return class probabilities
         
         Returns:
@@ -198,8 +189,8 @@ class SleepStageInference:
         # Preprocess
         if self.monitor_resources:
             start_time = time.time()
-        
-        ppg_tensor = self.preprocess_ppg(ppg_data)
+            
+        ppg_tensor = self._preprocess_ppg(ppg_data)
         
         if self.monitor_resources:
             self.metrics['preprocess_time'] += time.time() - start_time
@@ -461,7 +452,7 @@ def main():
     parser.add_argument('--data_file', type=str,
                        default='../../data/mesa_extracted/mesa_ppg_with_labels.h5',
                        help='Path to H5 data file')
-    parser.add_argument('--subject_id', type=int, default=2,
+    parser.add_argument('--subject_id', type=int, default=1,
                        help='Subject ID to test')
     parser.add_argument('--output_dir', type=str, default='../../outputs/inference_results',
                        help='Directory to save results')
@@ -478,7 +469,8 @@ def main():
     inference = SleepStageInference(
         checkpoint_path=args.checkpoint,
         model_type=args.model_type,
-        device=args.device
+        device=args.device,
+        monitor_resources=True
     )
     
     # Run prediction
@@ -492,6 +484,9 @@ def main():
     # Compute metrics
     metrics = inference.compute_metrics(predictions, true_labels)
     inference.print_metrics(metrics)
+    
+    # Print resource usage metrics
+    inference.print_resource_metrics()
     
     # Visualize results
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
