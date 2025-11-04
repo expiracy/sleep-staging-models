@@ -248,15 +248,6 @@ def main():
     # Export if requested
     if args.export:
         export_models_list(models, args.export)
-    
-    # Print summary
-    if models:
-        print(f"\nQuick Start:")
-        print(f"  1. Choose a model from the list above")
-        print(f"  2. Run inference using the provided command")
-        print(f"  3. Or use run_inference_example.py and update the MODEL_CHECKPOINT variable")
-        print()
-
 
 if __name__ == '__main__':
     main()
