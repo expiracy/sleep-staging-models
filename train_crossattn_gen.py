@@ -26,8 +26,9 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
-from multimodal_model_crossattn import ImprovedMultiModalSleepNet
+from models.multimodal_model_crossattn import ImprovedMultiModalSleepNet
 from multimodal_dataset_aligned import get_dataloaders
+from gpu_utils import setup_gpu_memory_limit, print_gpu_memory_usage
 
 
 def setup(rank, world_size):
@@ -50,6 +51,15 @@ class CrossAttentionTrainerDDP:
         self.world_size = world_size
         self.config = config
         self.run_id = run_id
+        
+        # Limit GPU memory to 80% before initializing models
+        vram_fraction = config.get('gpu', {}).get('memory_fraction', 0.8)
+        if rank == 0:  # Only print once
+            setup_gpu_memory_limit(vram_fraction)
+        else:
+            # Set limit on other GPUs without printing
+            torch.cuda.set_per_process_memory_fraction(vram_fraction, rank)
+        
         self.device = torch.device(f'cuda:{rank}')
         torch.cuda.set_device(self.device)
 

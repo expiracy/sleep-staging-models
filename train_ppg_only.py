@@ -15,8 +15,9 @@ import gc
 import argparse
 import yaml
 
-from multimodal_sleep_model import SleepPPGNet, MultiModalSleepNet
+from models.multimodal_sleep_model import SleepPPGNet, MultiModalSleepNet
 from multimodal_dataset_aligned import get_dataloaders
+from gpu_utils import setup_gpu_memory_limit, print_gpu_memory_usage
 
 
 class MultiModalTrainer:
@@ -28,6 +29,10 @@ class MultiModalTrainer:
             self.device = torch.device('cpu')
             print(f"Using device: {self.device} (forced by --cpu flag)")
         else:
+            # Limit GPU memory to 80% before initializing models
+            vram_fraction = config.get('gpu', {}).get('memory_fraction', 0.8)
+            setup_gpu_memory_limit(vram_fraction)
+            
             self.device = torch.device(f'cuda:{config["gpu"]["device_id"]}' if torch.cuda.is_available() else 'cpu')
             print(f"Using device: {self.device}")
 
@@ -61,7 +66,7 @@ class MultiModalTrainer:
         if self.config['model_type'] == 'ppg_only':
             model = SleepPPGNet()
         elif self.config['model_type'] == 'ppg_with_noise':
-            from ppg_with_noise_baseline import PPGWithNoiseBaseline
+            from models.ppg_with_noise_baseline import PPGWithNoiseBaseline
             model = PPGWithNoiseBaseline(
                 noise_config=self.config.get('noise_config', None)
             )

@@ -19,14 +19,20 @@ import gc
 import argparse
 import yaml
 
-from multimodal_model_crossattn import ImprovedMultiModalSleepNet
+from models.multimodal_model_crossattn import ImprovedMultiModalSleepNet
 from multimodal_dataset_aligned import get_dataloaders
+from gpu_utils import setup_gpu_memory_limit, print_gpu_memory_usage
 
 
 class CrossAttentionTrainer:
     def __init__(self, config, run_id=None):
         self.config = config
         self.run_id = run_id
+        
+        # Limit GPU memory to 80% before initializing models
+        vram_fraction = config.get('gpu', {}).get('memory_fraction', 0.8)
+        setup_gpu_memory_limit(vram_fraction)
+        
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {self.device}")
 

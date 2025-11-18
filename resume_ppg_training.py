@@ -14,7 +14,7 @@ import argparse
 import yaml
 import gc
 
-from ppg_unfiltered_crossattn import PPGUnfilteredCrossAttention
+from models.ppg_unfiltered_crossattn import PPGUnfilteredCrossAttention
 from multimodal_dataset_aligned import get_dataloaders
 from train_ppg_unfiltered import PPGUnfilteredTrainer
 from torch_load_utils import safe_torch_load

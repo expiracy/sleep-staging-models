@@ -21,9 +21,10 @@ import yaml
 import gc
 from collections import Counter, defaultdict
 
-from ppg_unfiltered_crossattn import PPGUnfilteredCrossAttention
+from models.ppg_unfiltered_crossattn import PPGUnfilteredCrossAttention
 from multimodal_dataset_aligned import get_dataloaders
 from train_crossattn import CrossAttentionTrainer
+from gpu_utils import setup_gpu_memory_limit, print_gpu_memory_usage
 
 
 class PPGUnfilteredTrainer(CrossAttentionTrainer):
