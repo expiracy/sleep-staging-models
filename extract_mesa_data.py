@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import pyedflib
@@ -9,6 +10,7 @@ from tqdm import tqdm
 import warnings
 import xml.etree.ElementTree as ET
 from collections import Counter
+from dotenv import load_dotenv
 
 warnings.filterwarnings('ignore')
 
@@ -533,13 +535,12 @@ class MESADataExtractor:
 
 
 def main():
+    load_dotenv()
 
-    MESA_PATH = "../../data/mesa"  
-    OUTPUT_PATH = "../../data/mesa_extracted" 
-
+    MESA_PATH = Path(os.getenv("MESA_RAW_PATH"))
+    OUTPUT_PATH = Path(os.getenv("MESA_PROCESSED_PATH"))
 
     extractor = MESADataExtractor(MESA_PATH, OUTPUT_PATH, require_ecg=False)
-
 
     # extractor.process_all_subjects(analyze_first=True)
 
