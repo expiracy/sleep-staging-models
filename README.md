@@ -75,6 +75,8 @@ python extract_mesa_data.py
 ```
 
 ## 🏃‍♂️ Training
+1. Activate the .venv
+2. `cd src/sleep-staging-models`
 
 ### Train Single-Stream Baseline (SleepPPG-Net)
 
