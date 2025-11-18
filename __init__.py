@@ -4,12 +4,13 @@ Sleep Staging Models Package
 Multi-modal sleep staging using PPG and ECG signals with cross-attention architectures.
 """
 
-from .multimodal_model_crossattn import (
+from .models.multimodal_model_crossattn import (
     ImprovedMultiModalSleepNet,
     MultiHeadCrossAttention,
     AdaptiveModalityWeighting
 )
-from .multimodal_sleep_model import SleepPPGNet
+from .models.multimodal_sleep_model import SleepPPGNet
+from .models.ppg_unfiltered_crossattn import PPGUnfilteredCrossAttention
 from .multimodal_dataset_aligned import get_dataloaders
 
 __all__ = [
@@ -17,5 +18,6 @@ __all__ = [
     'MultiHeadCrossAttention', 
     'AdaptiveModalityWeighting',
     'SleepPPGNet',
+    'PPGUnfilteredCrossAttention',
     'get_dataloaders'
 ]
