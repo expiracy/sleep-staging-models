@@ -1,12 +1,12 @@
 # Cross-Attention
 data:
-  ppg_file: "../../data/mesa_extracted/mesa_ppg_with_labels.h5"
-  ecg_file: "../../data/mesa_extracted/mesa_real_ecg.h5"
-  index_file: "../../data/mesa_extracted/mesa_subject_index.h5"
+  ppg_file: "../../data/mesa_processed/mesa_ppg_with_labels.h5"
+  ecg_file: "../../data/mesa_processed/mesa_real_ecg.h5"
+  index_file: "../../data/mesa_processed/mesa_subject_index.h5"
   num_workers: 4
 
 training:
-  batch_size: 2
+  batch_size: 1
   num_epochs: 50
   learning_rate: 0.0001
   weight_decay: 0.00001
@@ -22,8 +22,10 @@ output:
   save_dir: "../../outputs"
   save_frequency: 5
 
+gpu:
+  memory_fraction: 0.9
 
 use_amp: true
 
 
-gradient_accumulation_steps: 1
+gradient_accumulation_steps: 2
