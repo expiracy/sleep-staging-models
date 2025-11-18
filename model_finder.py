@@ -225,8 +225,8 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description='List available trained models')
-    parser.add_argument('--outputs_dir', type=str, default='../../outputs',
-                       help='Directory containing model outputs')
+    parser.add_argument('--outputs_dir', type=str, default='../../output',
+                       help='Directory containing model outputs (default: ../../output)')
     parser.add_argument('--export', type=str, default=None,
                        help='Export models list to JSON file')
     parser.add_argument('--best_only', action='store_true',
@@ -234,9 +234,13 @@ def main():
     
     args = parser.parse_args()
     
+    # Resolve relative path from script location
+    script_dir = Path(__file__).parent
+    outputs_dir = (script_dir / args.outputs_dir).resolve()
+    
     # Scan for models
-    print(f"\nScanning directory: {args.outputs_dir}")
-    models = scan_models_directory(args.outputs_dir)
+    print(f"\nScanning directory: {outputs_dir}")
+    models = scan_models_directory(str(outputs_dir))
     
     # Print results
     if args.best_only:
