@@ -32,6 +32,7 @@ torch.set_num_interop_threads(1)
 from models.multimodal_sleep_model import SleepPPGNet
 from models.ppg_unfiltered_crossattn import PPGUnfilteredCrossAttention
 from models.multimodal_model_crossattn import ImprovedMultiModalSleepNet
+from models.multimodal_model_crossattn_windowed import WindowAdaptiveSleepNet
 
 # Sleep stage labels
 SLEEP_STAGES = {
@@ -52,20 +53,33 @@ SLEEP_STAGE_COLORS = {
 class SleepStageInference:
     """Class for loading models and performing sleep stage inference"""
     
-    def __init__(self, checkpoint_path, model_type='ppg_only', device='cuda', monitor_resources=True):
+    def __init__(self, checkpoint_path, model_type=None, device='cuda', monitor_resources=True, config_path=None):
         """
         Initialize inference engine
         
         Args:
             checkpoint_path: Path to model checkpoint (.pth file)
-            model_type: Type of model ('ppg_only', 'ppg_unfiltered', 'crossattn_ecg')
+            model_type: Type of model ('ppg_only', 'ppg_unfiltered', 'crossattn_ecg', 'windowed_crossattn')
+                       If None, will try to auto-detect from config.json
             device: Device to run inference on ('cuda' or 'cpu')
             monitor_resources: If True, monitor memory and execution time
+            config_path: Path to config.json (if None, will look for it next to checkpoint)
         """
         self.checkpoint_path = checkpoint_path
-        self.model_type = model_type
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         self.monitor_resources = monitor_resources
+        
+        # Load config if provided or auto-detect
+        self.config = self._load_config(config_path)
+        
+        # Auto-detect model type from config if not provided
+        if model_type is None and self.config and 'model_type' in self.config:
+            self.model_type = self.config['model_type']
+            print(f"Auto-detected model type from config: {self.model_type}")
+        elif model_type is None:
+            raise ValueError("model_type not provided and could not be auto-detected from config.json")
+        else:
+            self.model_type = model_type
         
         print(f"Initializing inference on {self.device}")
         
@@ -94,6 +108,23 @@ class SleepStageInference:
         
         # Load checkpoint metadata
         self.checkpoint_info = self._load_checkpoint_info()
+    
+    def _load_config(self, config_path):
+        """Load config.json from checkpoint directory or specified path"""
+        if config_path is None:
+            # Try to find config.json in checkpoint directory
+            checkpoint_dir = Path(self.checkpoint_path).parent
+            config_path = checkpoint_dir / 'config.json'
+        else:
+            config_path = Path(config_path)
+        
+        if config_path.exists():
+            print(f"Loading config from {config_path}")
+            with open(config_path, 'r') as f:
+                return json.load(f)
+        else:
+            print(f"Warning: config.json not found at {config_path}")
+            return None
         
     def _load_model(self):
         """Load the appropriate model architecture and weights"""
@@ -102,13 +133,37 @@ class SleepStageInference:
         # Load checkpoint (weights_only=False for compatibility with older checkpoints)
         checkpoint = torch.load(self.checkpoint_path, map_location=self.device, weights_only=False)
         
+        # Get model parameters from config if available
+        if self.config and 'model' in self.config:
+            model_params = self.config['model']
+            d_model = model_params.get('d_model', 256)
+            n_heads = model_params.get('n_heads', 8)
+            n_fusion_blocks = model_params.get('n_fusion_blocks', 3)
+        else:
+            # Default parameters
+            d_model = 256
+            n_heads = 8
+            n_fusion_blocks = 3
+        
         # Create model based on type
         if self.model_type == 'ppg_only':
             model = SleepPPGNet()
         elif self.model_type == 'ppg_unfiltered':
             model = PPGUnfilteredCrossAttention()
         elif self.model_type == 'crossattn_ecg':
-            model = ImprovedMultiModalSleepNet()
+            model = ImprovedMultiModalSleepNet(
+                n_classes=4,
+                d_model=d_model,
+                n_heads=n_heads,
+                n_fusion_blocks=n_fusion_blocks
+            )
+        elif self.model_type == 'windowed_crossattn':
+            model = WindowAdaptiveSleepNet(
+                n_classes=4,
+                d_model=d_model,
+                n_heads=n_heads,
+                n_fusion_blocks=n_fusion_blocks
+            )
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
         
@@ -202,7 +257,7 @@ class SleepStageInference:
                 outputs = self.model(ppg_tensor)
             elif self.model_type == 'ppg_unfiltered':
                 outputs = self.model(ppg_tensor)
-            elif self.model_type == 'crossattn_ecg':
+            elif self.model_type in ['crossattn_ecg', 'windowed_crossattn']:
                 outputs = self.model(ppg_tensor, ppg_tensor)
         
         if self.monitor_resources:
@@ -437,14 +492,16 @@ def main():
     parser = argparse.ArgumentParser(description='Sleep Stage Inference')
     parser.add_argument('--checkpoint', type=str, required=True,
                         help='Path to model checkpoint')
-    parser.add_argument('--model_type', type=str, default='ppg_only',
-                        choices=['ppg_only', 'ppg_unfiltered', 'crossattn_ecg'],
-                        help='Type of model')
+    parser.add_argument('--model_type', type=str, default=None,
+                        choices=['ppg_only', 'ppg_unfiltered', 'crossattn_ecg', 'windowed_crossattn'],
+                        help='Type of model (auto-detects from config.json if not provided)')
+    parser.add_argument('--config', type=str, default=None,
+                        help='Path to config.json (auto-detects from checkpoint dir if not provided)')
     parser.add_argument('--data_file', type=str,
-                       default='../../data/mesa_extracted/mesa_ppg_with_labels.h5',
+                       default='../../data/mesa_processed/mesa_ppg_with_labels.h5',
                         help='Path to H5 data file')
     parser.add_argument('--data_index_file', type=str,
-                        default='../../data/mesa_extracted/mesa_subject_index.h5',
+                        default='../../data/mesa_processed/mesa_subject_index.h5',
                         help='Path to H5 data index file')
     parser.add_argument('--subject_id', type=int, default=1,
                         help='Subject ID to test')
@@ -464,7 +521,8 @@ def main():
         checkpoint_path=args.checkpoint,
         model_type=args.model_type,
         device=args.device,
-        monitor_resources=True
+        monitor_resources=True,
+        config_path=args.config
     )
     
     # Run prediction

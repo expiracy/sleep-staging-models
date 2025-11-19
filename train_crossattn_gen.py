@@ -71,7 +71,8 @@ class CrossAttentionTrainerDDP:
             self.setup_directories()
             self.writer = SummaryWriter(self.log_dir)
 
-            # Save configuration
+            # Save configuration with model type
+            config['model_type'] = self.model_type  # 'generated_ecg' or 'real_ecg'
             with open(os.path.join(self.checkpoint_dir, 'config.json'), 'w') as f:
                 json.dump(config, f, indent=2)
 

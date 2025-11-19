@@ -42,7 +42,8 @@ class CrossAttentionTrainer:
         # Initialize tensorboard
         self.writer = SummaryWriter(self.log_dir)
 
-        # Save configuration
+        # Save configuration with model type
+        config['model_type'] = 'crossattn_ecg'
         with open(os.path.join(self.checkpoint_dir, 'config.json'), 'w') as f:
             json.dump(config, f, indent=2)
 
