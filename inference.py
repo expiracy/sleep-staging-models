@@ -229,19 +229,27 @@ class SleepStageInference:
         
         return ppg_tensor
 
-    def predict(self, ppg_data, return_probabilities=False):
+    def predict(self, ppg_data, return_probabilities=False, streaming=False, window_size_epochs=None, overlap_epochs=None, batch_size=1):
         """
         Perform sleep stage prediction
         
         Args:
             ppg_data: Raw PPG signal (numpy array)
             return_probabilities: If True, return class probabilities
+            streaming: If True and model is windowed, process in chunks to save memory
+            window_size_epochs: Number of epochs per chunk (default: 30 for 15-min windows)
+            overlap_epochs: Number of overlapping epochs between chunks (default: 3 for 10% overlap)
+            batch_size: Number of chunks to process in parallel (default: 1, higher = faster but more memory)
         
         Returns:
             predictions: Sleep stage predictions for each 30-second epoch
             probabilities (optional): Class probabilities for each epoch
         """
-        # Preprocess
+        # Use streaming mode for windowed models if enabled
+        if streaming and self.model_type == 'windowed_crossattn':
+            return self._predict_streaming(ppg_data, return_probabilities, window_size_epochs, overlap_epochs, batch_size)
+        
+        # Standard inference (full sequence)
         if self.monitor_resources:
             start_time = time.time()
             
@@ -280,14 +288,176 @@ class SleepStageInference:
         else:
             return predictions
     
-    def predict_from_h5_subject(self, h5_file_path, h5_index_file_path, subject_id, return_probabilities=False):
+    def _predict_streaming(self, ppg_data, return_probabilities=False, window_size_epochs=None, overlap_epochs=None, batch_size=1):
+        """
+        Streaming inference for windowed models - processes chunks in batches
+        
+        Args:
+            ppg_data: Raw PPG signal (numpy array)
+            return_probabilities: If True, return class probabilities
+            window_size_epochs: Number of epochs per chunk (default: 30 for 15-min)
+            overlap_epochs: Number of overlapping epochs (default: 3 for 10%)
+            batch_size: Number of chunks to process in parallel (higher = faster, more memory)
+        
+        Returns:
+            predictions: Sleep stage predictions for each 30-second epoch
+            probabilities (optional): Class probabilities for each epoch
+        """
+        samples_per_epoch = 1024
+        total_samples = len(ppg_data)
+        total_epochs = total_samples // samples_per_epoch
+        
+        # Default window parameters (15-minute windows with 10% overlap)
+        if window_size_epochs is None:
+            window_size_epochs = 30
+        if overlap_epochs is None:
+            overlap_epochs = max(1, int(window_size_epochs * 0.1))
+        
+        stride_epochs = window_size_epochs - overlap_epochs
+        window_size_samples = window_size_epochs * samples_per_epoch
+        stride_samples = stride_epochs * samples_per_epoch
+        
+        # Calculate chunks
+        chunk_starts = list(range(0, total_samples - window_size_samples + 1, stride_samples))
+        num_chunks = len(chunk_starts)
+        
+        print(f"\nStreaming Inference Configuration:")
+        print(f"  Window size: {window_size_epochs} epochs ({window_size_epochs * 0.5:.1f} min)")
+        print(f"  Overlap: {overlap_epochs} epochs ({overlap_epochs * 0.5:.1f} min)")
+        print(f"  Stride: {stride_epochs} epochs")
+        print(f"  Total epochs: {total_epochs}")
+        print(f"  Total chunks: {num_chunks}")
+        print(f"  Batch size: {batch_size}")
+        print(f"  Batches: {(num_chunks + batch_size - 1) // batch_size}")
+        
+        # Initialize output arrays
+        all_predictions = []
+        all_probabilities = [] if return_probabilities else None
+        
+        # Process in batches
+        for batch_idx in range(0, num_chunks, batch_size):
+            batch_end = min(batch_idx + batch_size, num_chunks)
+            current_batch_size = batch_end - batch_idx
+            
+            # Prepare batch of chunks
+            batch_chunks = []
+            for i in range(batch_idx, batch_end):
+                start_sample = chunk_starts[i]
+                end_sample = start_sample + window_size_samples
+                chunk_data = ppg_data[start_sample:end_sample]
+                batch_chunks.append(chunk_data)
+            
+            # Stack into batch tensor
+            if self.monitor_resources:
+                start_time = time.time()
+            
+            batch_array = np.stack(batch_chunks, axis=0)  # (batch_size, window_size_samples)
+            ppg_batch = self._preprocess_ppg(batch_array)  # (batch_size, 1, window_size_samples)
+            
+            if self.monitor_resources:
+                self.metrics['preprocess_time'] += time.time() - start_time
+                start_time = time.time()
+            
+            # Run inference on batch
+            with torch.no_grad():
+                outputs = self.model(ppg_batch, ppg_batch)  # (batch_size, n_classes, window_size_epochs)
+            
+            if self.monitor_resources:
+                self.metrics['inference_time'] += time.time() - start_time
+                start_time = time.time()
+            
+            # Extract predictions for each chunk in batch
+            for chunk_offset in range(current_batch_size):
+                chunk_probs = outputs[chunk_offset].cpu().numpy()  # (n_classes, window_size_epochs)
+                chunk_preds = np.argmax(chunk_probs, axis=0)       # (window_size_epochs,)
+                
+                global_chunk_idx = batch_idx + chunk_offset
+                
+                # For overlapping regions, skip overlap except for first chunk
+                if global_chunk_idx == 0:
+                    # First chunk - use all predictions
+                    all_predictions.append(chunk_preds)
+                    if return_probabilities:
+                        all_probabilities.append(chunk_probs.T)  # (window_size_epochs, n_classes)
+                else:
+                    # Subsequent chunks - skip overlap region
+                    all_predictions.append(chunk_preds[overlap_epochs:])
+                    if return_probabilities:
+                        all_probabilities.append(chunk_probs.T[overlap_epochs:])
+            
+            if self.monitor_resources:
+                self.metrics['postprocess_time'] += time.time() - start_time
+                current_memory = self.process.memory_info().rss / 1024 / 1024
+                self.metrics['peak_memory_mb'] = max(self.metrics['peak_memory_mb'], current_memory)
+            
+            # Clear GPU cache after each batch
+            if self.device.type == 'cuda':
+                torch.cuda.empty_cache()
+            
+            start_epoch = chunk_starts[batch_idx] // samples_per_epoch
+            end_epoch = (chunk_starts[batch_end - 1] + window_size_samples) // samples_per_epoch - 1
+            print(f"  Processed batch {(batch_idx // batch_size) + 1}: chunks {batch_idx + 1}-{batch_end}, epochs {start_epoch}-{end_epoch}")
+        
+        # Concatenate all predictions
+        predictions = np.concatenate(all_predictions)
+        if return_probabilities:
+            probabilities = np.concatenate(all_probabilities, axis=0)
+        
+        # Handle any remaining epochs not covered by windows
+        covered_epochs = len(predictions)
+        if covered_epochs < total_epochs:
+            # Process final partial window if needed
+            remaining_start = covered_epochs * samples_per_epoch
+            remaining_data = ppg_data[remaining_start:]
+            
+            if len(remaining_data) >= samples_per_epoch:  # At least 1 epoch remains
+                # Pad to window size if needed
+                remaining_samples = len(remaining_data)
+                if remaining_samples < window_size_samples:
+                    # Pad with zeros
+                    padding = np.zeros(window_size_samples - remaining_samples)
+                    remaining_data = np.concatenate([remaining_data, padding])
+                
+                # Process remaining chunk
+                ppg_tensor = self._preprocess_ppg(remaining_data[:window_size_samples])
+                
+                with torch.no_grad():
+                    outputs = self.model(ppg_tensor, ppg_tensor)
+                
+                chunk_probs = outputs.squeeze(0).cpu().numpy()
+                chunk_preds = np.argmax(chunk_probs, axis=0)
+                
+                # Only take the number of epochs we actually need
+                remaining_epochs = total_epochs - covered_epochs
+                predictions = np.concatenate([predictions, chunk_preds[:remaining_epochs]])
+                
+                if return_probabilities:
+                    probabilities = np.concatenate([probabilities, chunk_probs.T[:remaining_epochs]], axis=0)
+                
+                print(f"  Processed final partial chunk: epochs {covered_epochs}-{total_epochs - 1}")
+        
+        # Ensure we have exactly total_epochs predictions
+        predictions = predictions[:total_epochs]
+        
+        if return_probabilities:
+            probabilities = probabilities[:total_epochs]
+            return predictions, probabilities
+        else:
+            return predictions
+    
+    def predict_from_h5_subject(self, h5_file_path, h5_index_file_path, subject_id, return_probabilities=False, streaming=False, window_size_epochs=None, overlap_epochs=None, batch_size=1):
         """
         Load and predict for a subject from H5 file
         
         Args:
             h5_file_path: Path to H5 file with PPG data
+            h5_index_file_path: Path to H5 index file
             subject_id: Subject ID to load (e.g. 1)
             return_probabilities: If True, return class probabilities
+            streaming: If True, use streaming inference (memory efficient for windowed models)
+            window_size_epochs: Window size for streaming (default: 30 epochs)
+            overlap_epochs: Overlap for streaming (default: 3 epochs)
+            batch_size: Number of chunks to process in parallel (default: 1, higher = faster)
         
         Returns:
             predictions: Sleep stage predictions
@@ -328,10 +498,18 @@ class SleepStageInference:
         
         # Predict
         if return_probabilities:
-            predictions, probabilities = self.predict(ppg_continuous, return_probabilities=True)
+            predictions, probabilities = self.predict(ppg_continuous, return_probabilities=True, 
+                                                     streaming=streaming, 
+                                                     window_size_epochs=window_size_epochs,
+                                                     overlap_epochs=overlap_epochs,
+                                                     batch_size=batch_size)
             result = (predictions, labels, probabilities)
         else:
-            predictions = self.predict(ppg_continuous, return_probabilities=False)
+            predictions = self.predict(ppg_continuous, return_probabilities=False,
+                                      streaming=streaming,
+                                      window_size_epochs=window_size_epochs,
+                                      overlap_epochs=overlap_epochs,
+                                      batch_size=batch_size)
             result = (predictions, labels)
         
         if self.monitor_resources:
@@ -510,6 +688,14 @@ def main():
     parser.add_argument('--device', type=str, default='cuda',
                         choices=['cuda', 'cpu'],
                         help='Device to run inference on')
+    parser.add_argument('--streaming', action='store_true',
+                        help='Use streaming inference (memory efficient for windowed models)')
+    parser.add_argument('--window_size_epochs', type=int, default=None,
+                        help='Window size in epochs for streaming (default: 30)')
+    parser.add_argument('--overlap_epochs', type=int, default=None,
+                        help='Overlap in epochs for streaming (default: 3)')
+    parser.add_argument('--batch_size', type=int, default=1,
+                        help='Batch size for streaming (higher = faster but more memory, default: 1)')
     
     args = parser.parse_args()
     
@@ -527,11 +713,18 @@ def main():
     
     # Run prediction
     print(f"\nRunning inference on subject {args.subject_id}...")
+    if args.streaming:
+        print("Using STREAMING mode - processing chunks sequentially for lower memory usage")
+    
     predictions, true_labels, probabilities = inference.predict_from_h5_subject(
         args.data_file,
         args.data_index_file,
         args.subject_id,
-        return_probabilities=True
+        return_probabilities=True,
+        streaming=args.streaming,
+        window_size_epochs=args.window_size_epochs,
+        overlap_epochs=args.overlap_epochs,
+        batch_size=args.batch_size
     )
     
     # Compute metrics

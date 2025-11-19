@@ -190,17 +190,26 @@ class WindowedCrossAttentionTrainer:
         return epoch_loss, epoch_acc
 
     def validate(self, model, dataloader, criterion):
-        """Validate with per-patient median metrics"""
+        """
+        Validate with per-subject median metrics.
+        
+        CRITICAL: Groups windows by actual subject to calculate correct per-patient metrics.
+        Each subject contributes multiple windows, so we aggregate predictions by subject
+        before calculating per-patient kappa/accuracy/F1.
+        """
         model.eval()
         running_loss = 0.0
 
-        # For overall calculation
+        # For overall calculation (all epochs)
         all_preds = []
         all_labels = []
 
-        # For per-patient calculation
-        patient_predictions = defaultdict(list)
-        patient_labels = defaultdict(list)
+        # For per-SUBJECT calculation (group windows by actual subject)
+        subject_predictions = defaultdict(list)
+        subject_labels = defaultdict(list)
+        
+        # Get windows per subject from dataset
+        windows_per_subject = dataloader.dataset.windows_per_subject
 
         with torch.no_grad():
             for batch_idx, (ppg, ecg, labels) in enumerate(tqdm(dataloader, desc="Validation")):
@@ -236,73 +245,77 @@ class WindowedCrossAttentionTrainer:
                     else:
                         loss = torch.tensor(0.0)
 
-                # Process each sample in batch
+                # Process each window in batch and map to actual subject
                 batch_size = outputs.shape[0]
                 for i in range(batch_size):
-                    patient_idx = batch_idx * dataloader.batch_size + i
+                    window_idx = batch_idx * dataloader.batch_size + i
+                    
+                    # Map window index to actual subject ID
+                    # Each subject has windows_per_subject consecutive windows in dataloader
+                    subject_idx = window_idx // windows_per_subject
 
-                    # Get valid predictions and labels for current patient
+                    # Get valid predictions and labels for current window
                     mask_i = labels[i] != -1
                     if mask_i.any():
-                        patient_outputs = outputs_reshaped[i][mask_i]
-                        patient_labels_i = labels[i][mask_i]
+                        window_outputs = outputs_reshaped[i][mask_i]
+                        window_labels_i = labels[i][mask_i]
 
-                        _, predicted = patient_outputs.max(1)
+                        _, predicted = window_outputs.max(1)
 
-                        # Store per-patient data
-                        patient_predictions[patient_idx].extend(predicted.cpu().numpy())
-                        patient_labels[patient_idx].extend(patient_labels_i.cpu().numpy())
+                        # Store by SUBJECT (not window)
+                        subject_predictions[subject_idx].extend(predicted.cpu().numpy())
+                        subject_labels[subject_idx].extend(window_labels_i.cpu().numpy())
 
                         # Also save to overall lists
                         all_preds.extend(predicted.cpu().numpy())
-                        all_labels.extend(patient_labels_i.cpu().numpy())
+                        all_labels.extend(window_labels_i.cpu().numpy())
 
                         if valid_labels.numel() > 0:
-                            running_loss += loss.item() * patient_labels_i.numel()
+                            running_loss += loss.item() * window_labels_i.numel()
 
-        # Calculate per-patient metrics
-        patient_accuracies = []
-        patient_kappas = []
-        patient_f1s = []
+        # Calculate per-SUBJECT metrics (aggregating all windows from same subject)
+        subject_accuracies = []
+        subject_kappas = []
+        subject_f1s = []
 
-        for patient_idx in patient_predictions:
-            if len(patient_predictions[patient_idx]) > 0:
-                patient_acc = np.mean(np.array(patient_predictions[patient_idx]) ==
-                                      np.array(patient_labels[patient_idx]))
-                patient_accuracies.append(patient_acc)
+        for subject_idx in subject_predictions:
+            if len(subject_predictions[subject_idx]) > 0:
+                subject_acc = np.mean(np.array(subject_predictions[subject_idx]) ==
+                                      np.array(subject_labels[subject_idx]))
+                subject_accuracies.append(subject_acc)
 
-                # Only calculate kappa when patient has multiple classes
-                unique_labels = np.unique(patient_labels[patient_idx])
+                # Only calculate kappa when subject has multiple classes
+                unique_labels = np.unique(subject_labels[subject_idx])
                 if len(unique_labels) > 1:
-                    patient_kappa = cohen_kappa_score(patient_labels[patient_idx],
-                                                      patient_predictions[patient_idx])
-                    patient_kappas.append(patient_kappa)
+                    subject_kappa = cohen_kappa_score(subject_labels[subject_idx],
+                                                      subject_predictions[subject_idx])
+                    subject_kappas.append(subject_kappa)
 
-                patient_f1 = f1_score(patient_labels[patient_idx],
-                                      patient_predictions[patient_idx],
+                subject_f1 = f1_score(subject_labels[subject_idx],
+                                      subject_predictions[subject_idx],
                                       average='weighted')
-                patient_f1s.append(patient_f1)
+                subject_f1s.append(subject_f1)
 
         # Calculate metrics
-        # Overall metrics
+        # Overall metrics (across all epochs)
         epoch_loss = running_loss / len(all_labels) if all_labels else 0
         overall_accuracy = np.mean(np.array(all_preds) == np.array(all_labels)) if all_labels else 0
         overall_kappa = cohen_kappa_score(all_labels, all_preds) if all_labels else 0
         overall_f1 = f1_score(all_labels, all_preds, average='weighted') if all_labels else 0
 
-        # Per-patient median metrics
-        median_accuracy = np.median(patient_accuracies) if patient_accuracies else 0
-        median_kappa = np.median(patient_kappas) if patient_kappas else 0
-        median_f1 = np.median(patient_f1s) if patient_f1s else 0
+        # Per-subject median metrics (now correctly grouped by actual subject)
+        median_accuracy = np.median(subject_accuracies) if subject_accuracies else 0
+        median_kappa = np.median(subject_kappas) if subject_kappas else 0
+        median_f1 = np.median(subject_f1s) if subject_f1s else 0
 
-        # Print per-patient kappa distribution
-        if patient_kappas:
-            print(f"\nPer-patient Kappa distribution:")
-            print(f"  Min: {np.min(patient_kappas):.4f}")
-            print(f"  25%: {np.percentile(patient_kappas, 25):.4f}")
+        # Print per-subject kappa distribution
+        if subject_kappas:
+            print(f"\nPer-subject Kappa distribution (n={len(subject_kappas)} subjects):")
+            print(f"  Min: {np.min(subject_kappas):.4f}")
+            print(f"  25%: {np.percentile(subject_kappas, 25):.4f}")
             print(f"  Median: {median_kappa:.4f}")
-            print(f"  75%: {np.percentile(patient_kappas, 75):.4f}")
-            print(f"  Max: {np.max(patient_kappas):.4f}")
+            print(f"  75%: {np.percentile(subject_kappas, 75):.4f}")
+            print(f"  Max: {np.max(subject_kappas):.4f}")
 
         # Calculate confusion matrix and per-class metrics
         cm = confusion_matrix(all_labels, all_preds)
@@ -319,7 +332,7 @@ class WindowedCrossAttentionTrainer:
             'all_preds': all_preds,
             'all_labels': all_labels,
             'per_class_metrics': per_class_metrics,
-            'patient_kappas': patient_kappas,
+            'subject_kappas': subject_kappas,  # Changed from patient_kappas
             'confusion_matrix': cm
         }
 
@@ -574,16 +587,16 @@ class WindowedCrossAttentionTrainer:
                 'recall': test_results['per_class_metrics']['recall'].tolist(),
                 'f1': test_results['per_class_metrics']['f1'].tolist()
             },
-            'patient_kappa_stats': {
-                'min': float(np.min(test_results['patient_kappas'])) if test_results['patient_kappas'] else 0,
-                'max': float(np.max(test_results['patient_kappas'])) if test_results['patient_kappas'] else 0,
-                'mean': float(np.mean(test_results['patient_kappas'])) if test_results['patient_kappas'] else 0,
-                'std': float(np.std(test_results['patient_kappas'])) if test_results['patient_kappas'] else 0,
+            'subject_kappa_stats': {  # Changed from patient_kappa_stats
+                'min': float(np.min(test_results['subject_kappas'])) if test_results['subject_kappas'] else 0,
+                'max': float(np.max(test_results['subject_kappas'])) if test_results['subject_kappas'] else 0,
+                'mean': float(np.mean(test_results['subject_kappas'])) if test_results['subject_kappas'] else 0,
+                'std': float(np.std(test_results['subject_kappas'])) if test_results['subject_kappas'] else 0,
                 'median': float(test_results['median_kappa']),
-                '25_percentile': float(np.percentile(test_results['patient_kappas'], 25)) if test_results[
-                    'patient_kappas'] else 0,
-                '75_percentile': float(np.percentile(test_results['patient_kappas'], 75)) if test_results[
-                    'patient_kappas'] else 0
+                '25_percentile': float(np.percentile(test_results['subject_kappas'], 25)) if test_results[
+                    'subject_kappas'] else 0,
+                '75_percentile': float(np.percentile(test_results['subject_kappas'], 75)) if test_results[
+                    'subject_kappas'] else 0
             },
             'config': self.config
         }

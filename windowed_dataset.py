@@ -116,7 +116,14 @@ class WindowedSleepDataset(Dataset):
         self._build_window_index()
     
     def _prepare_subjects(self):
-        """Split subjects into train/val/test sets"""
+        """
+        Split subjects into train/val/test sets.
+        
+        CRITICAL: Split is done at SUBJECT level to prevent data leakage.
+        All windows from a subject go to the same split (train/val/test).
+        This ensures the model never sees overlapping/adjacent windows from 
+        validation subjects during training.
+        """
         with h5py.File(self.index_file_path, 'r') as f:
             all_subjects = list(f['subjects'].keys())
             
@@ -128,15 +135,17 @@ class WindowedSleepDataset(Dataset):
                     valid_subjects.append(subj)
         
         if self.use_sleepppg_test_set:
-            # Use predefined test set
+            # Use predefined test set from SleepPPG-Net paper
             test_subjects = [s for s in SLEEPPPG_TEST_SUBJECTS if s in valid_subjects]
             train_val_subjects = [s for s in valid_subjects if s not in test_subjects]
             
+            # Split train_val into train and val at SUBJECT level
+            # This ensures no subject appears in both train and val
             train_subjects, val_subjects = train_test_split(
                 train_val_subjects, test_size=0.2, random_state=self.seed
             )
         else:
-            # Random split
+            # Random split at subject level
             train_subjects, test_subjects = train_test_split(
                 valid_subjects, test_size=0.2, random_state=self.seed
             )
@@ -153,6 +162,8 @@ class WindowedSleepDataset(Dataset):
             self.subjects = test_subjects
         
         print(f"{self.split} set: {len(self.subjects)} subjects")
+        print(f"  Each subject contributes {self.windows_per_subject} windows")
+        print(f"  Total windows: {len(self.subjects) * self.windows_per_subject}")
         
         # Load subject start indices from H5
         self.subject_start_indices = {}
@@ -348,8 +359,9 @@ if __name__ == "__main__":
         
         # Test loading a few batches
         print(f"\nLoading sample batches...")
+        train_dataset_obj = datasets[0]  # First dataset returned
         for i, batch in enumerate(train_loader):
-            if model_type == 'ppg_only':
+            if train_dataset_obj.model_type == 'ppg_only':
                 ppg, labels = batch
                 print(f"Batch {i+1}: PPG shape {ppg.shape}, Labels shape {labels.shape}")
             else:
