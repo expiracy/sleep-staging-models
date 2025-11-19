@@ -1,0 +1,45 @@
+# Configuration for training window-adaptive model
+# Uses curriculum learning: progressively smaller windows
+
+data:
+  ppg_path: "../../data/mesa_processed/mesa_ppg_with_labels.h5"
+  real_ecg_path: "../../data/mesa_processed/mesa_real_ecg.h5"
+  index_path: "../../data/mesa_processed/mesa_subject_index.h5"
+
+training:
+  batch_size: 4                  # Batch size per window
+  num_workers: 4                 # Data loading workers
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  use_amp: true                  # Mixed precision training
+  
+  # Curriculum learning stages
+  # Each stage trains on progressively smaller windows
+  curriculum:
+    stage1:  # Large windows - learn global patterns
+      epochs: 15
+      window_sizes: [150, 180, 200, 240]  # epochs (75-120 minutes)
+    
+    stage2:  # Medium-large windows
+      epochs: 15
+      window_sizes: [80, 100, 120, 150]  # epochs (40-75 minutes)
+    
+    stage3:  # Medium windows
+      epochs: 15
+      window_sizes: [40, 60, 80, 100]  # epochs (20-50 minutes)
+    
+    stage4:  # Mixed windows - fine-tuning
+      epochs: 15
+      window_sizes: [20, 30, 40, 60, 80, 100, 150]  # epochs (10-75 minutes)
+
+model:
+  n_classes: 4
+  d_model: 256
+  n_heads: 8
+  n_fusion_blocks: 3
+  dropout: 0.2
+
+output:
+  base_dir: "../../outputs"
+  save_best_only: false
+  tensorboard: false
