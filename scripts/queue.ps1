@@ -6,6 +6,4 @@
 
 Set-Location C:\Users\james\Documents\repos\ppg-sleep-stage-classifier\src\sleep_staging_models
 
-
-python train_windowed_crossattn.py --config configs/config_windowed.yaml --runs 1
-
+python train_ppg_unfiltered.py --config configs/config_ppg_unfiltered.yaml --runs 5

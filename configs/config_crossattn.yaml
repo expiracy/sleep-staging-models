@@ -27,5 +27,4 @@ gpu:
 
 use_amp: true
 
-
 gradient_accumulation_steps: 2
