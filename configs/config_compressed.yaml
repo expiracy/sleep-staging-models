@@ -7,7 +7,7 @@ data:
   num_workers: 4
 
 training:
-  batch_size: 8  # Can use larger batch with smaller model
+  batch_size: 2  # Can use larger batch with smaller model
   num_epochs: 50
   learning_rate: 0.0001
   weight_decay: 0.00001

@@ -33,6 +33,7 @@ from models.multimodal_sleep_model import SleepPPGNet
 from models.ppg_unfiltered_crossattn import PPGUnfilteredCrossAttention
 from models.multimodal_model_crossattn import ImprovedMultiModalSleepNet
 from models.multimodal_model_crossattn_windowed import WindowAdaptiveSleepNet
+from multimodal_dataset_aligned import SLEEPPPG_TEST_SUBJECTS
 
 # Sleep stage labels
 SLEEP_STAGES = {
@@ -53,33 +54,30 @@ SLEEP_STAGE_COLORS = {
 class SleepStageInference:
     """Class for loading models and performing sleep stage inference"""
     
-    def __init__(self, checkpoint_path, model_type=None, device='cuda', monitor_resources=True, config_path=None):
+    def __init__(self, checkpoint_path, model_type='ppg_only', device='cuda', monitor_resources=True, use_quantized=False, model_config=None):
         """
         Initialize inference engine
         
         Args:
             checkpoint_path: Path to model checkpoint (.pth file)
-            model_type: Type of model ('ppg_only', 'ppg_unfiltered', 'crossattn_ecg', 'windowed_crossattn')
-                       If None, will try to auto-detect from config.json
+            model_type: Type of model ('ppg_only', 'ppg_unfiltered', 'crossattn_ecg')
             device: Device to run inference on ('cuda' or 'cpu')
             monitor_resources: If True, monitor memory and execution time
-            config_path: Path to config.json (if None, will look for it next to checkpoint)
+            use_quantized: If True, checkpoint is a quantized model (force CPU)
+            model_config: Optional dict with model configuration (d_model, n_heads, n_fusion_blocks, dropout)
         """
         self.checkpoint_path = checkpoint_path
+        self.model_type = model_type
+        self.use_quantized = use_quantized
+        self.model_config = model_config or {}
+        
+        # Quantized models must run on CPU
+        if use_quantized and device == 'cuda':
+            print("WARNING: Quantized models run on CPU. Switching to CPU device.")
+            device = 'cpu'
+        
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         self.monitor_resources = monitor_resources
-        
-        # Load config if provided or auto-detect
-        self.config = self._load_config(config_path)
-        
-        # Auto-detect model type from config if not provided
-        if model_type is None and self.config and 'model_type' in self.config:
-            self.model_type = self.config['model_type']
-            print(f"Auto-detected model type from config: {self.model_type}")
-        elif model_type is None:
-            raise ValueError("model_type not provided and could not be auto-detected from config.json")
-        else:
-            self.model_type = model_type
         
         print(f"Initializing inference on {self.device}")
         
@@ -108,23 +106,6 @@ class SleepStageInference:
         
         # Load checkpoint metadata
         self.checkpoint_info = self._load_checkpoint_info()
-    
-    def _load_config(self, config_path):
-        """Load config.json from checkpoint directory or specified path"""
-        if config_path is None:
-            # Try to find config.json in checkpoint directory
-            checkpoint_dir = Path(self.checkpoint_path).parent
-            config_path = checkpoint_dir / 'config.json'
-        else:
-            config_path = Path(config_path)
-        
-        if config_path.exists():
-            print(f"Loading config from {config_path}")
-            with open(config_path, 'r') as f:
-                return json.load(f)
-        else:
-            print(f"Warning: config.json not found at {config_path}")
-            return None
         
     def _load_model(self):
         """Load the appropriate model architecture and weights"""
@@ -133,17 +114,20 @@ class SleepStageInference:
         # Load checkpoint (weights_only=False for compatibility with older checkpoints)
         checkpoint = torch.load(self.checkpoint_path, map_location=self.device, weights_only=False)
         
-        # Get model parameters from config if available
-        if self.config and 'model' in self.config:
-            model_params = self.config['model']
-            d_model = model_params.get('d_model', 256)
-            n_heads = model_params.get('n_heads', 8)
-            n_fusion_blocks = model_params.get('n_fusion_blocks', 3)
-        else:
-            # Default parameters
-            d_model = 256
-            n_heads = 8
-            n_fusion_blocks = 3
+        # Check if this is a quantized model
+        is_quantized = checkpoint.get('quantized', False) or self.use_quantized
+        
+        if is_quantized:
+            print("Loading quantized model...")
+        
+        # Extract model config from checkpoint if available
+        config = self.model_config.copy()
+        if 'model' in checkpoint:
+            checkpoint_config = checkpoint['model']
+            config.update(checkpoint_config)
+            print(f"Using model config from checkpoint: {config}")
+        elif config:
+            print(f"Using provided model config: {config}")
         
         # Create model based on type
         if self.model_type == 'ppg_only':
@@ -151,6 +135,11 @@ class SleepStageInference:
         elif self.model_type == 'ppg_unfiltered':
             model = PPGUnfilteredCrossAttention()
         elif self.model_type == 'crossattn_ecg':
+            # Extract relevant parameters with defaults
+            d_model = config.get('d_model', 256)
+            n_heads = config.get('n_heads', 8)
+            n_fusion_blocks = config.get('n_fusion_blocks', 3)
+            print(f"Creating crossattn_ecg model: d_model={d_model}, n_heads={n_heads}, n_fusion_blocks={n_fusion_blocks}")
             model = ImprovedMultiModalSleepNet(
                 n_classes=4,
                 d_model=d_model,
@@ -158,11 +147,18 @@ class SleepStageInference:
                 n_fusion_blocks=n_fusion_blocks
             )
         elif self.model_type == 'windowed_crossattn':
+            # Extract relevant parameters with defaults
+            d_model = config.get('d_model', 256)
+            n_heads = config.get('n_heads', 8)
+            n_fusion_blocks = config.get('n_fusion_blocks', 3)
+            dropout = config.get('dropout', 0.2)
+            print(f"Creating windowed_crossattn model: d_model={d_model}, n_heads={n_heads}, n_fusion_blocks={n_fusion_blocks}, dropout={dropout}")
             model = WindowAdaptiveSleepNet(
                 n_classes=4,
                 d_model=d_model,
                 n_heads=n_heads,
-                n_fusion_blocks=n_fusion_blocks
+                n_fusion_blocks=n_fusion_blocks,
+                dropout=dropout
             )
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
@@ -178,10 +174,22 @@ class SleepStageInference:
         # Print model info
         if 'epoch' in checkpoint:
             print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
+        elif 'original_epoch' in checkpoint:
+            print(f"Original checkpoint from epoch {checkpoint['original_epoch']}")
+            
         if 'best_val_kappa' in checkpoint:
             print(f"Best validation kappa: {checkpoint['best_val_kappa']:.4f}")
+        elif 'original_val_kappa' in checkpoint:
+            print(f"Original validation kappa: {checkpoint['original_val_kappa']:.4f}")
+            
         if 'best_val_acc' in checkpoint:
             print(f"Best validation accuracy: {checkpoint['best_val_acc']:.4f}")
+        elif 'original_val_acc' in checkpoint:
+            print(f"Original validation accuracy: {checkpoint['original_val_acc']:.4f}")
+        
+        if is_quantized and 'quantization_metadata' in checkpoint:
+            meta = checkpoint['quantization_metadata']
+            print(f"Quantized model: {meta.get('compression_ratio', 'N/A'):.2f}x compression")
         
         total_params = sum(p.numel() for p in model.parameters())
         print(f"Total parameters: {total_params:,}")
@@ -229,27 +237,19 @@ class SleepStageInference:
         
         return ppg_tensor
 
-    def predict(self, ppg_data, return_probabilities=False, streaming=False, window_size_epochs=None, overlap_epochs=None, batch_size=1):
+    def predict(self, ppg_data, return_probabilities=False):
         """
         Perform sleep stage prediction
         
         Args:
             ppg_data: Raw PPG signal (numpy array)
             return_probabilities: If True, return class probabilities
-            streaming: If True and model is windowed, process in chunks to save memory
-            window_size_epochs: Number of epochs per chunk (default: 30 for 15-min windows)
-            overlap_epochs: Number of overlapping epochs between chunks (default: 3 for 10% overlap)
-            batch_size: Number of chunks to process in parallel (default: 1, higher = faster but more memory)
         
         Returns:
             predictions: Sleep stage predictions for each 30-second epoch
             probabilities (optional): Class probabilities for each epoch
         """
-        # Use streaming mode for windowed models if enabled
-        if streaming and self.model_type == 'windowed_crossattn':
-            return self._predict_streaming(ppg_data, return_probabilities, window_size_epochs, overlap_epochs, batch_size)
-        
-        # Standard inference (full sequence)
+        # Preprocess
         if self.monitor_resources:
             start_time = time.time()
             
@@ -267,6 +267,8 @@ class SleepStageInference:
                 outputs = self.model(ppg_tensor)
             elif self.model_type in ['crossattn_ecg', 'windowed_crossattn']:
                 outputs = self.model(ppg_tensor, ppg_tensor)
+            else:
+                raise ValueError(f"Unknown model type for inference: {self.model_type}")
         
         if self.monitor_resources:
             self.metrics['inference_time'] += time.time() - start_time
@@ -288,176 +290,14 @@ class SleepStageInference:
         else:
             return predictions
     
-    def _predict_streaming(self, ppg_data, return_probabilities=False, window_size_epochs=None, overlap_epochs=None, batch_size=1):
-        """
-        Streaming inference for windowed models - processes chunks in batches
-        
-        Args:
-            ppg_data: Raw PPG signal (numpy array)
-            return_probabilities: If True, return class probabilities
-            window_size_epochs: Number of epochs per chunk (default: 30 for 15-min)
-            overlap_epochs: Number of overlapping epochs (default: 3 for 10%)
-            batch_size: Number of chunks to process in parallel (higher = faster, more memory)
-        
-        Returns:
-            predictions: Sleep stage predictions for each 30-second epoch
-            probabilities (optional): Class probabilities for each epoch
-        """
-        samples_per_epoch = 1024
-        total_samples = len(ppg_data)
-        total_epochs = total_samples // samples_per_epoch
-        
-        # Default window parameters (15-minute windows with 10% overlap)
-        if window_size_epochs is None:
-            window_size_epochs = 30
-        if overlap_epochs is None:
-            overlap_epochs = max(1, int(window_size_epochs * 0.1))
-        
-        stride_epochs = window_size_epochs - overlap_epochs
-        window_size_samples = window_size_epochs * samples_per_epoch
-        stride_samples = stride_epochs * samples_per_epoch
-        
-        # Calculate chunks
-        chunk_starts = list(range(0, total_samples - window_size_samples + 1, stride_samples))
-        num_chunks = len(chunk_starts)
-        
-        print(f"\nStreaming Inference Configuration:")
-        print(f"  Window size: {window_size_epochs} epochs ({window_size_epochs * 0.5:.1f} min)")
-        print(f"  Overlap: {overlap_epochs} epochs ({overlap_epochs * 0.5:.1f} min)")
-        print(f"  Stride: {stride_epochs} epochs")
-        print(f"  Total epochs: {total_epochs}")
-        print(f"  Total chunks: {num_chunks}")
-        print(f"  Batch size: {batch_size}")
-        print(f"  Batches: {(num_chunks + batch_size - 1) // batch_size}")
-        
-        # Initialize output arrays
-        all_predictions = []
-        all_probabilities = [] if return_probabilities else None
-        
-        # Process in batches
-        for batch_idx in range(0, num_chunks, batch_size):
-            batch_end = min(batch_idx + batch_size, num_chunks)
-            current_batch_size = batch_end - batch_idx
-            
-            # Prepare batch of chunks
-            batch_chunks = []
-            for i in range(batch_idx, batch_end):
-                start_sample = chunk_starts[i]
-                end_sample = start_sample + window_size_samples
-                chunk_data = ppg_data[start_sample:end_sample]
-                batch_chunks.append(chunk_data)
-            
-            # Stack into batch tensor
-            if self.monitor_resources:
-                start_time = time.time()
-            
-            batch_array = np.stack(batch_chunks, axis=0)  # (batch_size, window_size_samples)
-            ppg_batch = self._preprocess_ppg(batch_array)  # (batch_size, 1, window_size_samples)
-            
-            if self.monitor_resources:
-                self.metrics['preprocess_time'] += time.time() - start_time
-                start_time = time.time()
-            
-            # Run inference on batch
-            with torch.no_grad():
-                outputs = self.model(ppg_batch, ppg_batch)  # (batch_size, n_classes, window_size_epochs)
-            
-            if self.monitor_resources:
-                self.metrics['inference_time'] += time.time() - start_time
-                start_time = time.time()
-            
-            # Extract predictions for each chunk in batch
-            for chunk_offset in range(current_batch_size):
-                chunk_probs = outputs[chunk_offset].cpu().numpy()  # (n_classes, window_size_epochs)
-                chunk_preds = np.argmax(chunk_probs, axis=0)       # (window_size_epochs,)
-                
-                global_chunk_idx = batch_idx + chunk_offset
-                
-                # For overlapping regions, skip overlap except for first chunk
-                if global_chunk_idx == 0:
-                    # First chunk - use all predictions
-                    all_predictions.append(chunk_preds)
-                    if return_probabilities:
-                        all_probabilities.append(chunk_probs.T)  # (window_size_epochs, n_classes)
-                else:
-                    # Subsequent chunks - skip overlap region
-                    all_predictions.append(chunk_preds[overlap_epochs:])
-                    if return_probabilities:
-                        all_probabilities.append(chunk_probs.T[overlap_epochs:])
-            
-            if self.monitor_resources:
-                self.metrics['postprocess_time'] += time.time() - start_time
-                current_memory = self.process.memory_info().rss / 1024 / 1024
-                self.metrics['peak_memory_mb'] = max(self.metrics['peak_memory_mb'], current_memory)
-            
-            # Clear GPU cache after each batch
-            if self.device.type == 'cuda':
-                torch.cuda.empty_cache()
-            
-            start_epoch = chunk_starts[batch_idx] // samples_per_epoch
-            end_epoch = (chunk_starts[batch_end - 1] + window_size_samples) // samples_per_epoch - 1
-            print(f"  Processed batch {(batch_idx // batch_size) + 1}: chunks {batch_idx + 1}-{batch_end}, epochs {start_epoch}-{end_epoch}")
-        
-        # Concatenate all predictions
-        predictions = np.concatenate(all_predictions)
-        if return_probabilities:
-            probabilities = np.concatenate(all_probabilities, axis=0)
-        
-        # Handle any remaining epochs not covered by windows
-        covered_epochs = len(predictions)
-        if covered_epochs < total_epochs:
-            # Process final partial window if needed
-            remaining_start = covered_epochs * samples_per_epoch
-            remaining_data = ppg_data[remaining_start:]
-            
-            if len(remaining_data) >= samples_per_epoch:  # At least 1 epoch remains
-                # Pad to window size if needed
-                remaining_samples = len(remaining_data)
-                if remaining_samples < window_size_samples:
-                    # Pad with zeros
-                    padding = np.zeros(window_size_samples - remaining_samples)
-                    remaining_data = np.concatenate([remaining_data, padding])
-                
-                # Process remaining chunk
-                ppg_tensor = self._preprocess_ppg(remaining_data[:window_size_samples])
-                
-                with torch.no_grad():
-                    outputs = self.model(ppg_tensor, ppg_tensor)
-                
-                chunk_probs = outputs.squeeze(0).cpu().numpy()
-                chunk_preds = np.argmax(chunk_probs, axis=0)
-                
-                # Only take the number of epochs we actually need
-                remaining_epochs = total_epochs - covered_epochs
-                predictions = np.concatenate([predictions, chunk_preds[:remaining_epochs]])
-                
-                if return_probabilities:
-                    probabilities = np.concatenate([probabilities, chunk_probs.T[:remaining_epochs]], axis=0)
-                
-                print(f"  Processed final partial chunk: epochs {covered_epochs}-{total_epochs - 1}")
-        
-        # Ensure we have exactly total_epochs predictions
-        predictions = predictions[:total_epochs]
-        
-        if return_probabilities:
-            probabilities = probabilities[:total_epochs]
-            return predictions, probabilities
-        else:
-            return predictions
-    
-    def predict_from_h5_subject(self, h5_file_path, h5_index_file_path, subject_id, return_probabilities=False, streaming=False, window_size_epochs=None, overlap_epochs=None, batch_size=1):
+    def predict_from_h5_subject(self, h5_file_path, h5_index_file_path, subject_id, return_probabilities=False):
         """
         Load and predict for a subject from H5 file
         
         Args:
             h5_file_path: Path to H5 file with PPG data
-            h5_index_file_path: Path to H5 index file
             subject_id: Subject ID to load (e.g. 1)
             return_probabilities: If True, return class probabilities
-            streaming: If True, use streaming inference (memory efficient for windowed models)
-            window_size_epochs: Window size for streaming (default: 30 epochs)
-            overlap_epochs: Overlap for streaming (default: 3 epochs)
-            batch_size: Number of chunks to process in parallel (default: 1, higher = faster)
         
         Returns:
             predictions: Sleep stage predictions
@@ -498,18 +338,10 @@ class SleepStageInference:
         
         # Predict
         if return_probabilities:
-            predictions, probabilities = self.predict(ppg_continuous, return_probabilities=True, 
-                                                     streaming=streaming, 
-                                                     window_size_epochs=window_size_epochs,
-                                                     overlap_epochs=overlap_epochs,
-                                                     batch_size=batch_size)
+            predictions, probabilities = self.predict(ppg_continuous, return_probabilities=True)
             result = (predictions, labels, probabilities)
         else:
-            predictions = self.predict(ppg_continuous, return_probabilities=False,
-                                      streaming=streaming,
-                                      window_size_epochs=window_size_epochs,
-                                      overlap_epochs=overlap_epochs,
-                                      batch_size=batch_size)
+            predictions = self.predict(ppg_continuous, return_probabilities=False)
             result = (predictions, labels)
         
         if self.monitor_resources:
@@ -667,37 +499,111 @@ class SleepStageInference:
 
 def main():
     """Main inference script"""
+    # Compute default data paths from repo root
+    repo_root = Path(__file__).resolve().parents[2]  # Go up from src/sleep_staging_models/
+    default_data_file = str(repo_root / 'data' / 'mesa_processed' / 'mesa_ppg_with_labels.h5')
+    default_index_file = str(repo_root / 'data' / 'mesa_processed' / 'mesa_subject_index.h5')
+    
     parser = argparse.ArgumentParser(description='Sleep Stage Inference')
-    parser.add_argument('--checkpoint', type=str, required=True,
-                        help='Path to model checkpoint')
+    parser.add_argument('--checkpoint', type=str, default=None,
+                        help='Path to model checkpoint (.pth file)')
+    parser.add_argument('--checkpoint_dir', type=str, default=None,
+                        help='Path to checkpoint directory (will use best_model.pth and config.json from this directory)')
+    parser.add_argument('--config', type=str, default=None,
+                        help='Path to config.json file (if provided, model_type and data paths are read from it)')
     parser.add_argument('--model_type', type=str, default=None,
                         choices=['ppg_only', 'ppg_unfiltered', 'crossattn_ecg', 'windowed_crossattn'],
-                        help='Type of model (auto-detects from config.json if not provided)')
-    parser.add_argument('--config', type=str, default=None,
-                        help='Path to config.json (auto-detects from checkpoint dir if not provided)')
-    parser.add_argument('--data_file', type=str,
-                       default='../../data/mesa_processed/mesa_ppg_with_labels.h5',
-                        help='Path to H5 data file')
-    parser.add_argument('--data_index_file', type=str,
-                        default='../../data/mesa_processed/mesa_subject_index.h5',
-                        help='Path to H5 data index file')
-    parser.add_argument('--subject_id', type=int, default=1,
-                        help='Subject ID to test')
+                        help='Type of model (overrides config if both provided)')
+    parser.add_argument('--data_file', type=str, default=default_data_file,
+                        help='Path to H5 PPG data file')
+    parser.add_argument('--data_index_file', type=str, default=default_index_file,
+                        help='Path to H5 index file')
+    parser.add_argument('--subject_id', type=int, default=None,
+                        help='Subject ID to test (if not provided, runs on all SLEEPPPG_TEST_SUBJECTS)')
     parser.add_argument('--output_dir', type=str, default='../../outputs/inference_results',
                         help='Directory to save results')
     parser.add_argument('--device', type=str, default='cuda',
                         choices=['cuda', 'cpu'],
                         help='Device to run inference on')
-    parser.add_argument('--streaming', action='store_true',
-                        help='Use streaming inference (memory efficient for windowed models)')
-    parser.add_argument('--window_size_epochs', type=int, default=None,
-                        help='Window size in epochs for streaming (default: 30)')
-    parser.add_argument('--overlap_epochs', type=int, default=None,
-                        help='Overlap in epochs for streaming (default: 3)')
-    parser.add_argument('--batch_size', type=int, default=1,
-                        help='Batch size for streaming (higher = faster but more memory, default: 1)')
+    parser.add_argument('--quantized', action='store_true',
+                        help='Use quantized model (automatically uses CPU)')
     
     args = parser.parse_args()
+    
+    # Handle checkpoint_dir argument
+    if args.checkpoint_dir:
+        checkpoint_dir = Path(args.checkpoint_dir)
+        if not checkpoint_dir.is_absolute():
+            checkpoint_dir = Path.cwd() / checkpoint_dir
+        
+        # Set checkpoint and config paths
+        if not args.checkpoint:
+            args.checkpoint = str(checkpoint_dir / 'best_model.pth')
+            print(f"Using checkpoint: {args.checkpoint}")
+        if not args.config:
+            config_candidate = checkpoint_dir / 'config.json'
+            if config_candidate.exists():
+                args.config = str(config_candidate)
+                print(f"Using config: {args.config}")
+    
+    # Validate that checkpoint is provided
+    if not args.checkpoint:
+        parser.error("Either --checkpoint or --checkpoint_dir must be provided")
+    
+    # Load config if provided
+    config_data = None
+    if args.config:
+        # Convert to absolute path if relative
+        config_path = Path(args.config)
+        if not config_path.is_absolute():
+            config_path = Path.cwd() / config_path
+        
+        print(f"Loading configuration from {config_path}")
+        if not config_path.exists():
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+        
+        with open(config_path, 'r') as f:
+            config_data = json.load(f)
+    
+    # Determine model_type (priority: command line > config > try to infer from checkpoint path)
+    if args.model_type:
+        model_type = args.model_type
+        print(f"Using model type from command line: {model_type}")
+    elif config_data and 'model_type' in config_data:
+        model_type = config_data['model_type']
+        print(f"Using model type from config: {model_type}")
+    else:
+        # Try to infer from checkpoint path
+        checkpoint_path_lower = args.checkpoint.lower()
+        if 'windowed' in checkpoint_path_lower:
+            model_type = 'windowed_crossattn'
+        elif 'crossattn' in checkpoint_path_lower or 'ecg' in checkpoint_path_lower:
+            model_type = 'crossattn_ecg'
+        elif 'unfiltered' in checkpoint_path_lower:
+            model_type = 'ppg_unfiltered'
+        else:
+            model_type = 'ppg_only'
+        print(f"Inferred model type from checkpoint path: {model_type}")
+    
+    # Use data paths from parser (already set to defaults)
+    data_file = args.data_file
+    data_index_file = args.data_index_file
+    
+    print(f"\nData files:")
+    print(f"  PPG data: {data_file}")
+    print(f"  Index: {data_index_file}")
+    
+    # Validate data files exist
+    if not Path(data_file).exists():
+        raise FileNotFoundError(f"PPG data file not found: {data_file}")
+    if not Path(data_index_file).exists():
+        raise FileNotFoundError(f"Index file not found: {data_index_file}")
+    
+    # Extract model config if available
+    model_config = None
+    if config_data and 'model' in config_data:
+        model_config = config_data['model']
+        print(f"\nModel config from file: {model_config}")
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -705,76 +611,163 @@ def main():
     # Initialize inference engine
     inference = SleepStageInference(
         checkpoint_path=args.checkpoint,
-        model_type=args.model_type,
+        model_type=model_type,
         device=args.device,
         monitor_resources=True,
-        config_path=args.config
+        use_quantized=args.quantized,
+        model_config=model_config
     )
     
-    # Run prediction
-    print(f"\nRunning inference on subject {args.subject_id}...")
-    if args.streaming:
-        print("Using STREAMING mode - processing chunks sequentially for lower memory usage")
+    # Determine which subjects to process
+    if args.subject_id is not None:
+        # Single subject mode
+        subjects_to_process = [args.subject_id]
+    else:
+        # All test subjects mode
+        subjects_to_process = [int(s) for s in SLEEPPPG_TEST_SUBJECTS]
+        print(f"\nNo subject ID specified. Running inference on all {len(subjects_to_process)} test subjects...")
     
-    predictions, true_labels, probabilities = inference.predict_from_h5_subject(
-        args.data_file,
-        args.data_index_file,
-        args.subject_id,
-        return_probabilities=True,
-        streaming=args.streaming,
-        window_size_epochs=args.window_size_epochs,
-        overlap_epochs=args.overlap_epochs,
-        batch_size=args.batch_size
-    )
+    # Track aggregate metrics
+    all_metrics = []
+    failed_subjects = []
     
-    # Compute metrics
-    metrics = inference.compute_metrics(predictions, true_labels)
-    inference.print_metrics(metrics)
+    # Run prediction for each subject
+    for subject_id in subjects_to_process:
+        try:
+            print(f"\n{'='*60}")
+            print(f"Processing subject {subject_id} ({subjects_to_process.index(subject_id)+1}/{len(subjects_to_process)})")
+            print(f"{'='*60}")
+            
+            predictions, true_labels, probabilities = inference.predict_from_h5_subject(
+                data_file,
+                data_index_file,
+                subject_id,
+                return_probabilities=True
+            )
+            
+            # Compute metrics
+            metrics = inference.compute_metrics(predictions, true_labels)
+            metrics['subject_id'] = subject_id
+            all_metrics.append(metrics)
+            inference.print_metrics(metrics)
+            
+            # Visualize results (only if processing single subject)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            if len(subjects_to_process) == 1:
+                save_path = os.path.join(args.output_dir, 
+                                        f'hypnogram_subject_{subject_id}_{timestamp}.png')
+                inference.visualize_predictions(predictions, true_labels, save_path=save_path)
+            
+            # Save predictions and probabilities
+            results = {
+                'subject_id': subject_id,
+                'predictions': predictions.tolist(),
+                'true_labels': true_labels.tolist(),
+                'probabilities': probabilities.tolist(),
+                'metrics': metrics,
+                'model_info': {
+                    'checkpoint': args.checkpoint,
+                    'model_type': model_type,
+                    'checkpoint_info': inference.checkpoint_info,
+                    'config_file': str(config_path) if args.config else None
+                }
+            }
+            
+            results_path = os.path.join(args.output_dir,
+                                       f'predictions_subject_{subject_id}_{timestamp}.json')
+            
+            # Convert numpy types to Python native types for JSON serialization
+            def convert_to_native(obj):
+                if isinstance(obj, np.integer):
+                    return int(obj)
+                elif isinstance(obj, np.floating):
+                    return float(obj)
+                elif isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                elif isinstance(obj, dict):
+                    return {key: convert_to_native(value) for key, value in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert_to_native(item) for item in obj]
+                return obj
+            
+            results = convert_to_native(results)
+            
+            with open(results_path, 'w') as f:
+                json.dump(results, f, indent=2)
+            
+            print(f"Saved results to {results_path}")
+            
+        except Exception as e:
+            print(f"\n❌ Error processing subject {subject_id}: {e}")
+            failed_subjects.append(subject_id)
+            continue
     
-    # Visualize results
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_path = os.path.join(args.output_dir, 
-                            f'hypnogram_subject_{args.subject_id}_{timestamp}.png')
-    inference.visualize_predictions(predictions, true_labels, save_path=save_path)
+    # If processing multiple subjects, compute and save aggregate statistics
+    if len(subjects_to_process) > 1:
+        print(f"\n{'='*60}")
+        print("AGGREGATE RESULTS")
+        print(f"{'='*60}")
+        print(f"Successfully processed: {len(all_metrics)}/{len(subjects_to_process)} subjects")
+        if failed_subjects:
+            print(f"Failed subjects: {failed_subjects}")
+        
+        if all_metrics:
+            # Compute mean and std for each metric
+            avg_kappa = np.mean([m['kappa'] for m in all_metrics])
+            std_kappa = np.std([m['kappa'] for m in all_metrics])
+            avg_accuracy = np.mean([m['accuracy'] for m in all_metrics])
+            std_accuracy = np.std([m['accuracy'] for m in all_metrics])
+            avg_f1_macro = np.mean([m['f1_macro'] for m in all_metrics])
+            std_f1_macro = np.std([m['f1_macro'] for m in all_metrics])
+            
+            print(f"\nCohen's Kappa:      {avg_kappa:.4f} ± {std_kappa:.4f}")
+            print(f"Accuracy:           {avg_accuracy:.4f} ± {std_accuracy:.4f}")
+            print(f"F1-Score (Macro):   {avg_f1_macro:.4f} ± {std_f1_macro:.4f}")
+            
+            # Per-class F1 scores
+            print("\nPer-Class F1-Scores (mean ± std):")
+            for stage in SLEEP_STAGES.values():
+                stage_f1s = [m['f1_per_class'][stage] for m in all_metrics]
+                print(f"  {stage:8s}: {np.mean(stage_f1s):.4f} ± {np.std(stage_f1s):.4f}")
+            
+            # Save aggregate results
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            aggregate_results = {
+                'model_info': {
+                    'checkpoint': args.checkpoint,
+                    'model_type': model_type,
+                    'checkpoint_info': inference.checkpoint_info,
+                    'config_file': str(config_path) if args.config else None
+                },
+                'summary': {
+                    'total_subjects': len(subjects_to_process),
+                    'successful_subjects': len(all_metrics),
+                    'failed_subjects': failed_subjects,
+                    'avg_kappa': float(avg_kappa),
+                    'std_kappa': float(std_kappa),
+                    'avg_accuracy': float(avg_accuracy),
+                    'std_accuracy': float(std_accuracy),
+                    'avg_f1_macro': float(avg_f1_macro),
+                    'std_f1_macro': float(std_f1_macro),
+                    'per_class_f1': {
+                        stage: {
+                            'mean': float(np.mean([m['f1_per_class'][stage] for m in all_metrics])),
+                            'std': float(np.std([m['f1_per_class'][stage] for m in all_metrics]))
+                        } for stage in SLEEP_STAGES.values()
+                    }
+                },
+                'per_subject_metrics': all_metrics
+            }
+            
+            aggregate_path = os.path.join(args.output_dir, f'aggregate_results_{timestamp}.json')
+            with open(aggregate_path, 'w') as f:
+                json.dump(aggregate_results, f, indent=2)
+            
+            print(f"\nSaved aggregate results to {aggregate_path}")
     
-    # Save predictions and probabilities
-    results = {
-        'subject_id': args.subject_id,
-        'predictions': predictions.tolist(),
-        'true_labels': true_labels.tolist(),
-        'probabilities': probabilities.tolist(),
-        'metrics': metrics,
-        'model_info': {
-            'checkpoint': args.checkpoint,
-            'model_type': args.model_type,
-            'checkpoint_info': inference.checkpoint_info
-        }
-    }
-    
-    results_path = os.path.join(args.output_dir,
-                               f'predictions_subject_{args.subject_id}_{timestamp}.json')
-    
-    # Convert numpy types to Python native types for JSON serialization
-    def convert_to_native(obj):
-        if isinstance(obj, np.integer):
-            return int(obj)
-        elif isinstance(obj, np.floating):
-            return float(obj)
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, dict):
-            return {key: convert_to_native(value) for key, value in obj.items()}
-        elif isinstance(obj, list):
-            return [convert_to_native(item) for item in obj]
-        return obj
-    
-    results = convert_to_native(results)
-    
-    with open(results_path, 'w') as f:
-        json.dump(results, f, indent=2)
-    
-    print(f"\nSaved results to {results_path}")
-    print(f"\nInference complete!")
+    print(f"\n{'='*60}")
+    print("Inference complete!")
+    print(f"{'='*60}")
 
 
 if __name__ == '__main__':

@@ -20,6 +20,7 @@ import argparse
 import yaml
 
 from models.multimodal_model_crossattn_windowed import WindowAdaptiveSleepNet
+from models.multimodal_model_crossattn_compressed import CompactWindowAdaptiveSleepNet
 from windowed_dataset import get_windowed_dataloaders
 from gpu_utils import setup_gpu_memory_limit, print_gpu_memory_usage
 
@@ -397,13 +398,23 @@ class WindowedCrossAttentionTrainer:
         print(f"  Window size: {window_epochs} epochs ({window_duration_minutes} minutes)")
         print(f"  Overlap: {overlap_percent}%")
 
-        # Create model
-        model = WindowAdaptiveSleepNet(
-            n_classes=4,
-            d_model=self.config['model']['d_model'],
-            n_heads=self.config['model']['n_heads'],
-            n_fusion_blocks=self.config['model']['n_fusion_blocks']
-        ).to(self.device)
+        # Create model - choose based on d_model size
+        if self.config['model']['d_model'] <= 128:
+            print("\nUsing COMPRESSED model architecture")
+            model = CompactWindowAdaptiveSleepNet(
+                n_classes=4,
+                d_model=self.config['model']['d_model'],
+                n_heads=self.config['model']['n_heads'],
+                n_fusion_blocks=self.config['model']['n_fusion_blocks']
+            ).to(self.device)
+        else:
+            print("\nUsing FULL-SIZE model architecture")
+            model = WindowAdaptiveSleepNet(
+                n_classes=4,
+                d_model=self.config['model']['d_model'],
+                n_heads=self.config['model']['n_heads'],
+                n_fusion_blocks=self.config['model']['n_fusion_blocks']
+            ).to(self.device)
 
         print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
