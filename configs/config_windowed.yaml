@@ -1,6 +1,7 @@
 # Windowed Cross-Attention Training
 data:
   ppg_file: "../../data/mesa_processed/mesa_ppg_with_labels.h5"
+  ecg_file: "../../data/mesa_processed/mesa_real_ecg.h5"
   index_file: "../../data/mesa_processed/mesa_subject_index.h5"
   num_workers: 4
 
