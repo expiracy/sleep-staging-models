@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import numpy as np
 from scipy import signal
 import math
+from .model_type import ModelType
 
 
 class PPGUnfilteredCrossAttention(nn.Module):
@@ -74,6 +75,8 @@ class PPGUnfilteredCrossAttention(nn.Module):
             nn.Dropout(0.2),
             nn.Conv1d(128, n_classes, 1)
         )
+
+        self.model_type = ModelType.PPG_UNFILTERED
 
     def _create_encoder(self, d_model):
         """Create encoder"""

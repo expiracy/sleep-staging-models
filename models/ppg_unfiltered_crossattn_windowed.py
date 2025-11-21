@@ -16,6 +16,7 @@ import torch.nn.functional as F
 from torch.nn.utils import weight_norm
 import numpy as np
 import math
+from .model_type import ModelType
 
 
 class ResConvBlock(nn.Module):
@@ -39,6 +40,8 @@ class ResConvBlock(nn.Module):
             )
         else:
             self.residual_conv = None
+
+        self.model_type = ModelType.PPG_UNFILTERED_CROSSATTN_WINDOWED
 
     def forward(self, x):
         residual = x

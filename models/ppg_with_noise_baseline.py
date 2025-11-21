@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from .multimodal_sleep_model import SleepPPGNet
+from .model_type import ModelType
 
 
 class PPGWithNoiseBaseline(nn.Module):
@@ -30,6 +31,8 @@ class PPGWithNoiseBaseline(nn.Module):
             'spike_probability': 0.01,  # Motion artifact probability
             'spike_amplitude': 0.5  # Motion artifact amplitude
         }
+
+        self.model_type = ModelType.PPG_WITH_NOISE
 
     def add_noise_to_ppg(self, clean_ppg):
         """

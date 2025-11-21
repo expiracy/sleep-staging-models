@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils import weight_norm
 import math
+from .model_type import ModelType
 
 
 class ResConvBlock(nn.Module):
@@ -29,6 +30,8 @@ class ResConvBlock(nn.Module):
             )
         else:
             self.residual_conv = None
+
+        self.model_type = ModelType.MULTIMODAL_CROSSATTN
 
     def forward(self, x):
         residual = x

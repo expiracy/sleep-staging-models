@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils import weight_norm
+from .model_type import ModelType
 
 
 # 从SleepPPG-Net复用的组件
@@ -212,6 +213,8 @@ class MultiModalSleepNet(nn.Module):
         # 输出层
         self.final_conv = nn.Conv1d(128, 4, 1)
 
+        self.model_type = ModelType.MULTIMODAL
+
     def forward(self, ppg, ecg):
         # 特征提取
         ppg_features = self.ppg_encoder(ppg)  # (B, 256, 4800)
@@ -272,6 +275,8 @@ class SleepPPGNet(nn.Module):
         self.tcnblock1 = TemporalConvNet(128, 128, kernel_size=7, dropout=0.2)
         self.tcnblock2 = TemporalConvNet(128, 128, kernel_size=7, dropout=0.2)
         self.final_conv = nn.Conv1d(128, 4, 1)
+
+        self.model_type = ModelType.PPG_ONLY
 
     def forward(self, x):
         x = self.resconv_blocks(x)
