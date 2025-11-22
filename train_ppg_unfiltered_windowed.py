@@ -404,7 +404,7 @@ class PPGUnfilteredWindowedTrainer:
             dropout=self.config['model'].get('dropout', 0.2),
             noise_config=self.config.get('noise', None),
             use_sparse=self.config.get('use_sparse', False),
-            sparse_threshold=self.config.get('sparse_threshold', 0.01)
+            top_k_percent=self.config.get('top_k_percent', 0.01)
         ).to(self.device)
 
         print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -695,8 +695,8 @@ def main():
                         help='Number of runs')
     parser.add_argument('--use_sparse', action='store_true',
                         help='Enable threshold sparse attention optimization')
-    parser.add_argument('--sparse_threshold', type=float, default=0.01,
-                        help='Threshold for sparse attention (default: 0.01)')
+    parser.add_argument('--top_k_percent', type=float, default=0.01,
+                        help='Top k percent for sparse attention (default: 0.01)')
     args = parser.parse_args()
 
     # Load configuration
@@ -706,8 +706,8 @@ def main():
     # Add sparse attention parameters from command line args
     if args.use_sparse:
         config['use_sparse'] = True
-        config['sparse_threshold'] = args.sparse_threshold
-        print(f"\n⚡ Sparse Attention Enabled: threshold={args.sparse_threshold}")
+        config['top_k_percent'] = args.top_k_percent
+        print(f"\n⚡ Sparse Attention Enabled: top_k_percent={args.top_k_percent}")
 
     # Multiple runs
     n_runs = args.runs

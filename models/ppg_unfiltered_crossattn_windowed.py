@@ -1,11 +1,11 @@
 """
-PPG + Unfiltered PPG Cross-Attention Model - Window-Adaptive Version
+PPG + Unfiltered PPG Cross-Attention Model - Window-Adaptive Version with Sparse Attention
 
-Key changes from original:
+Key features:
 1. Supports variable-length input sequences
 2. Dynamic positional encoding
-3. No hardcoded output length (1200)
-4. Adaptive pooling based on input size
+3. Adaptive pooling based on input size
+4. Proper top-k sparse attention for training and inference
 
 This model validates whether cross-attention mechanism can extract useful 
 information from noisy signals while supporting arbitrary window lengths.
@@ -16,7 +16,6 @@ import torch.nn.functional as F
 from torch.nn.utils import weight_norm
 import numpy as np
 import math
-from .model_type import ModelType
 
 
 class ResConvBlock(nn.Module):
@@ -90,15 +89,15 @@ class LearnedPositionalEncoding(nn.Module):
 
 
 class MultiHeadCrossAttention(nn.Module):
-    """Multi-Head Cross-Attention Mechanism with Sparse Attention optimization"""
+    """Multi-Head Cross-Attention with proper top-k sparse attention"""
 
-    def __init__(self, d_model, n_heads=8, dropout=0.1, use_sparse=False, sparse_threshold=0.01):
+    def __init__(self, d_model, n_heads=8, dropout=0.1, use_sparse=False, top_k_percent=0.10):
         super(MultiHeadCrossAttention, self).__init__()
         self.d_model = d_model
         self.n_heads = n_heads
         self.d_k = d_model // n_heads
         self.use_sparse = use_sparse
-        self.sparse_threshold = sparse_threshold
+        self.top_k_percent = top_k_percent
 
         self.w_q = nn.Linear(d_model, d_model)
         self.w_k = nn.Linear(d_model, d_model)
@@ -109,7 +108,7 @@ class MultiHeadCrossAttention(nn.Module):
         self.layer_norm = nn.LayerNorm(d_model)
         
         if self.use_sparse:
-            print(f"  ✓ Using Threshold Sparse Attention (threshold={sparse_threshold})")
+            print(f"  ✓ Using Top-K Sparse Attention (keep top {top_k_percent*100:.0f}%)")
 
     def forward(self, query, key, value, mask=None):
         batch_size, seq_len, _ = query.shape
@@ -119,18 +118,29 @@ class MultiHeadCrossAttention(nn.Module):
         K = self.w_k(key).view(batch_size, -1, self.n_heads, self.d_k).transpose(1, 2)
         V = self.w_v(value).view(batch_size, -1, self.n_heads, self.d_k).transpose(1, 2)
         
-        # Attention calculation
+        # Attention scores: (batch, heads, seq_len, key_len)
         scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
 
+        # Apply mask if provided
         if mask is not None:
             scores = scores.masked_fill(mask == 0, -1e9)
         
-        # Threshold-based sparsification (if enabled)
-        if self.use_sparse and not self.training:
-            # Create sparse mask: zero out scores below threshold
-            sparse_mask = (scores > self.sparse_threshold).float()
-            scores = scores * sparse_mask
+        # Top-K sparsification (works during training and inference)
+        if self.use_sparse:
+            key_len = scores.size(-1)
+            top_k = max(1, int(key_len * self.top_k_percent))
+            
+            # Get top-k indices
+            _, top_k_idx = torch.topk(scores, k=top_k, dim=-1, largest=True)
+            
+            # Create mask: -inf for non-top-k positions
+            sparse_mask = torch.full_like(scores, float('-inf'))
+            sparse_mask.scatter_(-1, top_k_idx, 0.0)  # 0.0 for top-k positions
+            
+            # Apply sparse mask
+            scores = scores + sparse_mask  # Adding 0 keeps top-k, adding -inf zeros others
 
+        # Softmax
         attention_weights = F.softmax(scores, dim=-1)
         attention_weights = self.dropout(attention_weights)
 
@@ -182,13 +192,17 @@ class AdaptiveModalityWeighting(nn.Module):
 class CrossModalFusionBlock(nn.Module):
     """Cross-modal fusion using bidirectional cross-attention"""
 
-    def __init__(self, d_model, n_heads=8, dropout=0.1, use_sparse=False, sparse_threshold=0.01):
+    def __init__(self, d_model, n_heads=8, dropout=0.1, use_sparse=False, top_k_percent=0.10):
         super(CrossModalFusionBlock, self).__init__()
         
         # Clean PPG attends to Noisy PPG
-        self.clean_cross_attn = MultiHeadCrossAttention(d_model, n_heads, dropout, use_sparse, sparse_threshold)
+        self.clean_cross_attn = MultiHeadCrossAttention(
+            d_model, n_heads, dropout, use_sparse, top_k_percent
+        )
         # Noisy PPG attends to Clean PPG
-        self.noisy_cross_attn = MultiHeadCrossAttention(d_model, n_heads, dropout, use_sparse, sparse_threshold)
+        self.noisy_cross_attn = MultiHeadCrossAttention(
+            d_model, n_heads, dropout, use_sparse, top_k_percent
+        )
         
         # Feed-forward networks
         self.clean_ffn = nn.Sequential(
@@ -252,7 +266,7 @@ class TemporalBlock(nn.Module):
 
 class PPGUnfilteredWindowedCrossAttention(nn.Module):
     """
-    Window-adaptive PPG + Unfiltered PPG cross-attention model.
+    Window-adaptive PPG + Unfiltered PPG cross-attention model with sparse attention.
     
     Supports variable-length inputs from 10 epochs to full 1200 epochs.
     Stream 1: Clean PPG signal (standard filtering)
@@ -260,27 +274,29 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
     """
     
     def __init__(self, n_classes=4, d_model=256, n_heads=8, n_fusion_blocks=3, 
-                 dropout=0.2, noise_config=None, use_sparse=False, sparse_threshold=0.01):
+                 dropout=0.2, noise_config=None, use_sparse=False, top_k_percent=0.10):
         super(PPGUnfilteredWindowedCrossAttention, self).__init__()
         
         self.d_model = d_model
         self.n_classes = n_classes
         self.use_sparse = use_sparse
-        self.sparse_threshold = sparse_threshold
+        self.top_k_percent = top_k_percent
         
         # Print optimization status
-        print("\n" + "="*60)
+        print("\n" + "="*70)
         print("PPG UNFILTERED WINDOWED CROSS-ATTENTION MODEL")
-        print("="*60)
+        print("="*70)
         
         if use_sparse:
-            print(f"\n⚡ Threshold Sparse Attention ENABLED (threshold={sparse_threshold})")
+            print(f"\n⚡ Top-K Sparse Attention ENABLED")
+            print(f"   Keep top: {top_k_percent*100:.0f}% of attention weights")
             print(f"   Expected speedup: 2-3x on attention layers")
-            print(f"   Accuracy impact: <2% (based on 99.8% near-zero scores)")
+            print(f"   Works during training: YES")
+            print(f"   Recommended: Start training or fine-tune for best results")
         else:
-            print("\n📊 Standard Model (No Optimizations)")
+            print("\n📊 Standard Model (No Sparse Attention)")
         
-        print("="*60 + "\n")
+        print("="*70 + "\n")
         
         # Noise configuration
         self.noise_config = noise_config or {
@@ -292,8 +308,6 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
         }
         
         # Encoders - 9 ResConv blocks reduce by 2^9 = 512x
-        # Input: 1 channel, various lengths
-        # Output: d_model channels, length//512
         encoder_channels = [1, 16, 32, 32, 64, 64, 128, 128, 256, d_model]
         
         clean_ppg_encoder_blocks = []
@@ -311,9 +325,9 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
         # Modality weighting
         self.modality_weighting = AdaptiveModalityWeighting(d_model)
         
-        # Cross-modal fusion blocks with optimization support
+        # Cross-modal fusion blocks with sparse attention support
         self.fusion_blocks = nn.ModuleList([
-            CrossModalFusionBlock(d_model, n_heads, dropout, use_sparse, sparse_threshold)
+            CrossModalFusionBlock(d_model, n_heads, dropout, use_sparse, top_k_percent)
             for _ in range(n_fusion_blocks)
         ])
         
@@ -441,7 +455,7 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
         clean_features_t = clean_features_weighted.transpose(1, 2)
         noisy_features_t = noisy_features_weighted.transpose(1, 2)
 
-        # Cross-Modal Fusion
+        # Cross-Modal Fusion with sparse attention
         for fusion_block in self.fusion_blocks:
             clean_features_t, noisy_features_t = fusion_block(clean_features_t, noisy_features_t)
 
@@ -460,9 +474,6 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
         refined_features = self.feature_refinement(temporal_features)
 
         # Adaptive upsampling to match number of epochs
-        # Current: samples//512 -> Target: n_epochs
-        # Since 512 samples reduces to 1 feature, and 1024 samples = 1 epoch
-        # We need to upsample by factor of 2
         output_features = F.interpolate(
             refined_features, 
             size=n_epochs, 
@@ -499,9 +510,9 @@ def test_variable_lengths():
     
     # Test 2: Sparse Attention
     print("\n" + "="*70)
-    print("TEST 2: Model with Threshold Sparse Attention")
+    print("TEST 2: Model with Top-K Sparse Attention (10%)")
     print("="*70)
-    model_sparse = PPGUnfilteredWindowedCrossAttention(use_sparse=True, sparse_threshold=0.01)
+    model_sparse = PPGUnfilteredWindowedCrossAttention(use_sparse=True, top_k_percent=0.10)
     model_sparse.eval()
     
     print("\n" + "="*70)
@@ -523,24 +534,37 @@ def test_variable_lengths():
             samples = n_epochs * 1024
             ppg = torch.randn(2, 1, samples)
             
-            output = model(ppg)
+            # Test both models
+            output_standard = model(ppg)
+            output_sparse = model_sparse(ppg)
             
-            print(f"{description}:")
+            print(f"\n{description}:")
             print(f"  Input:  {ppg.shape}")
-            print(f"  Output: {output.shape}")
-            assert output.shape == (2, 4, n_epochs), f"Expected (2, 4, {n_epochs}), got {output.shape}"
-            print(f"  ✓ Correct output shape\n")
+            print(f"  Output (standard): {output_standard.shape}")
+            print(f"  Output (sparse):   {output_sparse.shape}")
+            
+            assert output_standard.shape == (2, 4, n_epochs), f"Expected (2, 4, {n_epochs})"
+            assert output_sparse.shape == (2, 4, n_epochs), f"Expected (2, 4, {n_epochs})"
+            
+            # Compare outputs
+            diff = (output_standard - output_sparse).abs().mean()
+            print(f"  Mean difference (standard vs sparse): {diff:.6f}")
+            print(f"  ✓ Correct output shapes")
     
     # Parameter count
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    print("\n" + "="*70)
+    print("MODEL STATISTICS")
+    print("="*70)
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
     
     # Test noise generation
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print("NOISE GENERATION TEST")
-    print("=" * 60)
+    print("=" * 70)
     clean_ppg = torch.randn(1, 1, 10240)  # 10 epochs
     noisy_ppg = model.add_noise_to_ppg(clean_ppg)
     
@@ -548,7 +572,9 @@ def test_variable_lengths():
     print(f"Noisy PPG - mean: {noisy_ppg.mean():.4f}, std: {noisy_ppg.std():.4f}")
     print(f"Noise level: {(noisy_ppg - clean_ppg).std():.4f}")
     
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
+    print("✅ ALL TESTS PASSED")
+    print("=" * 70 + "\n")
 
 
 if __name__ == "__main__":
