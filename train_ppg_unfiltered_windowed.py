@@ -697,6 +697,8 @@ def main():
                         help='Enable threshold sparse attention optimization')
     parser.add_argument('--top_k_percent', type=float, default=0.01,
                         help='Top k percent for sparse attention (default: 0.01)')
+    parser.add_argument('--positional_encoding', type=str, default='learned',
+                        help='Type of positional encoding (default: learned)')
     args = parser.parse_args()
 
     # Load configuration
@@ -708,6 +710,8 @@ def main():
         config['use_sparse'] = True
         config['top_k_percent'] = args.top_k_percent
         print(f"\n⚡ Sparse Attention Enabled: top_k_percent={args.top_k_percent}")
+    
+    config['model']['positional_encoding'] = args.positional_encoding
 
     # Multiple runs
     n_runs = args.runs

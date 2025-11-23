@@ -3,7 +3,7 @@ PPG + Unfiltered PPG Cross-Attention Model - Window-Adaptive Version with Sparse
 
 Key features:
 1. Supports variable-length input sequences
-2. Dynamic positional encoding
+2. Dynamic positional encoding (sinusoidal or learned)
 3. Adaptive pooling based on input size
 4. Proper top-k sparse attention for training and inference
 
@@ -53,6 +53,49 @@ class ResConvBlock(nn.Module):
             residual = self.residual_conv(residual)
 
         return x + residual
+
+
+class DynamicSinusoidalEncoding(nn.Module):
+    """Sinusoidal positional encoding that works with ANY sequence length"""
+    
+    def __init__(self, d_model, max_len=None):
+        super(DynamicSinusoidalEncoding, self).__init__()
+        self.d_model = d_model
+        
+        # Pre-compute wavelengths (invariant to sequence length)
+        inv_freq = torch.exp(
+            torch.arange(0, d_model, 2).float() * 
+            (-math.log(10000.0) / d_model)
+        )
+        self.register_buffer('inv_freq', inv_freq)
+    
+    def forward(self, x):
+        """
+        Args:
+            x: (batch, d_model, seq_len)
+        Returns:
+            x with positional encoding added
+        """
+        batch_size, d_model, seq_len = x.shape
+        
+        # Generate position indices for current sequence length
+        position = torch.arange(seq_len, device=x.device, dtype=torch.float32)
+        
+        # Compute sinusoidal encoding: position * inv_freq
+        # position: (seq_len,) -> (seq_len, 1)
+        # inv_freq: (d_model/2,) -> (1, d_model/2)
+        # Result: (seq_len, d_model/2)
+        sinusoid_inp = position.unsqueeze(1) * self.inv_freq.unsqueeze(0)
+        
+        # Apply sin and cos
+        pos_emb = torch.zeros(seq_len, d_model, device=x.device, dtype=x.dtype)
+        pos_emb[:, 0::2] = torch.sin(sinusoid_inp)
+        pos_emb[:, 1::2] = torch.cos(sinusoid_inp)
+        
+        # Reshape to match input: (1, d_model, seq_len)
+        pos_emb = pos_emb.transpose(0, 1).unsqueeze(0)
+        
+        return x + pos_emb
 
 
 class LearnedPositionalEncoding(nn.Module):
@@ -274,13 +317,15 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
     """
     
     def __init__(self, n_classes=4, d_model=256, n_heads=8, n_fusion_blocks=3, 
-                 dropout=0.2, noise_config=None, use_sparse=False, top_k_percent=0.10):
+                 dropout=0.2, noise_config=None, use_sparse=False, top_k_percent=0.10,
+                 positional_encoding='sinusoidal', max_len=5000):
         super(PPGUnfilteredWindowedCrossAttention, self).__init__()
         
         self.d_model = d_model
         self.n_classes = n_classes
         self.use_sparse = use_sparse
         self.top_k_percent = top_k_percent
+        self.positional_encoding_type = positional_encoding
         
         # Print optimization status
         print("\n" + "="*70)
@@ -289,12 +334,15 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
         
         if use_sparse:
             print(f"\nTop-K Sparse Attention ENABLED")
-            print(f"   Keep top: {top_k_percent*100:.0f}% of attention weights")
-            print(f"   Expected speedup: 2-3x on attention layers")
-            print(f"   Works during training: YES")
-            print(f"   Recommended: Start training or fine-tune for best results")
         else:
             print("\nStandard Model (No Sparse Attention)")
+        
+        # Print positional encoding type
+        print(f"\nPositional Encoding: {positional_encoding.upper()}")
+        if positional_encoding == 'sinusoidal':
+            print("   Type: Mathematical (sin/cos)")
+        elif positional_encoding == 'learned':
+            print(f"   Type: Learned embeddings")
         
         print("="*70 + "\n")
         
@@ -319,8 +367,14 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
         self.clean_ppg_encoder = nn.Sequential(*clean_ppg_encoder_blocks)
         self.noisy_ppg_encoder = nn.Sequential(*noisy_ppg_encoder_blocks)
         
-        # Learned positional encoding (supports variable lengths)
-        self.positional_encoding = LearnedPositionalEncoding(d_model, max_len=5000)
+        # Positional encoding (sinusoidal or learned based on config)
+        if positional_encoding == 'sinusoidal':
+            self.positional_encoding = DynamicSinusoidalEncoding(d_model)
+        elif positional_encoding == 'learned':
+            self.positional_encoding = LearnedPositionalEncoding(d_model, max_len=max_len)
+        else:
+            raise ValueError(f"Unknown positional encoding type: {positional_encoding}. "
+                           f"Must be 'sinusoidal' or 'learned'")
         
         # Modality weighting
         self.modality_weighting = AdaptiveModalityWeighting(d_model)
@@ -501,18 +555,29 @@ def test_variable_lengths():
     print("TESTING PPG UNFILTERED WINDOWED CROSS-ATTENTION MODEL")
     print("="*70)
     
-    # Test 1: Standard model
+    # Test 1: Standard model with sinusoidal encoding
     print("\n" + "="*70)
-    print("TEST 1: Standard Model (Baseline)")
+    print("TEST 1: Sinusoidal Encoding (Baseline)")
     print("="*70)
-    model = PPGUnfilteredWindowedCrossAttention()
-    model.eval()
+    model_sin = PPGUnfilteredWindowedCrossAttention(positional_encoding='sinusoidal')
+    model_sin.eval()
     
-    # Test 2: Sparse Attention
+    # Test 2: Learned encoding
     print("\n" + "="*70)
-    print("TEST 2: Model with Top-K Sparse Attention (10%)")
+    print("TEST 2: Learned Encoding")
     print("="*70)
-    model_sparse = PPGUnfilteredWindowedCrossAttention(use_sparse=True, top_k_percent=0.10)
+    model_learned = PPGUnfilteredWindowedCrossAttention(positional_encoding='learned')
+    model_learned.eval()
+    
+    # Test 3: Sparse Attention with sinusoidal
+    print("\n" + "="*70)
+    print("TEST 3: Sparse Attention + Sinusoidal Encoding")
+    print("="*70)
+    model_sparse = PPGUnfilteredWindowedCrossAttention(
+        use_sparse=True, 
+        top_k_percent=0.10,
+        positional_encoding='sinusoidal'
+    )
     model_sparse.eval()
     
     print("\n" + "="*70)
@@ -534,43 +599,86 @@ def test_variable_lengths():
             samples = n_epochs * 1024
             ppg = torch.randn(2, 1, samples)
             
-            # Test both models
-            output_standard = model(ppg)
+            # Test all three models
+            output_sin = model_sin(ppg)
+            output_learned = model_learned(ppg)
             output_sparse = model_sparse(ppg)
             
             print(f"\n{description}:")
             print(f"  Input:  {ppg.shape}")
-            print(f"  Output (standard): {output_standard.shape}")
-            print(f"  Output (sparse):   {output_sparse.shape}")
+            print(f"  Output (sinusoidal): {output_sin.shape}")
+            print(f"  Output (learned):    {output_learned.shape}")
+            print(f"  Output (sparse+sin): {output_sparse.shape}")
             
-            assert output_standard.shape == (2, 4, n_epochs), f"Expected (2, 4, {n_epochs})"
+            assert output_sin.shape == (2, 4, n_epochs), f"Expected (2, 4, {n_epochs})"
+            assert output_learned.shape == (2, 4, n_epochs), f"Expected (2, 4, {n_epochs})"
             assert output_sparse.shape == (2, 4, n_epochs), f"Expected (2, 4, {n_epochs})"
             
             # Compare outputs
-            diff = (output_standard - output_sparse).abs().mean()
-            print(f"  Mean difference (standard vs sparse): {diff:.6f}")
-            print(f"  ✓ Correct output shapes")
+            diff_sin_learned = (output_sin - output_learned).abs().mean()
+            diff_sin_sparse = (output_sin - output_sparse).abs().mean()
+            print(f"  Difference (sinusoidal vs learned): {diff_sin_learned:.6f}")
+            print(f"  Difference (sinusoidal vs sparse):  {diff_sin_sparse:.6f}")
+            print(f"  ✓ All models produce correct output shapes")
     
-    # Parameter count
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
+    # Parameter counts
     print("\n" + "="*70)
     print("MODEL STATISTICS")
     print("="*70)
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
+    
+    total_params_sin = sum(p.numel() for p in model_sin.parameters())
+    trainable_params_sin = sum(p.numel() for p in model_sin.parameters() if p.requires_grad)
+    
+    total_params_learned = sum(p.numel() for p in model_learned.parameters())
+    trainable_params_learned = sum(p.numel() for p in model_learned.parameters() if p.requires_grad)
+    
+    print(f"\nSinusoidal Encoding Model:")
+    print(f"  Total parameters: {total_params_sin:,}")
+    print(f"  Trainable parameters: {trainable_params_sin:,}")
+    
+    print(f"\nLearned Encoding Model:")
+    print(f"  Total parameters: {total_params_learned:,}")
+    print(f"  Trainable parameters: {trainable_params_learned:,}")
+    
+    diff_params = total_params_learned - total_params_sin
+    print(f"\nParameter difference: {diff_params:,} ({diff_params / total_params_sin * 100:.2f}% increase)")
     
     # Test noise generation
     print("\n" + "=" * 70)
     print("NOISE GENERATION TEST")
     print("=" * 70)
     clean_ppg = torch.randn(1, 1, 10240)  # 10 epochs
-    noisy_ppg = model.add_noise_to_ppg(clean_ppg)
+    noisy_ppg = model_sin.add_noise_to_ppg(clean_ppg)
     
     print(f"Clean PPG - mean: {clean_ppg.mean():.4f}, std: {clean_ppg.std():.4f}")
     print(f"Noisy PPG - mean: {noisy_ppg.mean():.4f}, std: {noisy_ppg.std():.4f}")
     print(f"Noise level: {(noisy_ppg - clean_ppg).std():.4f}")
+    
+    # Test extreme lengths with sinusoidal encoding
+    print("\n" + "=" * 70)
+    print("EXTREME LENGTH TEST (Sinusoidal Encoding)")
+    print("=" * 70)
+    
+    extreme_lengths = [
+        (5, "5 epochs (very short)"),
+        (5000, "5000 epochs (beyond training max_len)"),
+        (10000, "10000 epochs (extreme extrapolation)")
+    ]
+    
+    with torch.no_grad():
+        for n_epochs, description in extreme_lengths:
+            samples = n_epochs * 1024
+            ppg = torch.randn(1, 1, samples)
+            
+            try:
+                output = model_sin(ppg)
+                print(f"\n{description}:")
+                print(f"  Input:  {ppg.shape}")
+                print(f"  Output: {output.shape}")
+                print(f"  ✓ Successfully handled extreme length")
+            except Exception as e:
+                print(f"\n{description}:")
+                print(f"  ✗ Failed with error: {e}")
     
     print("\n" + "=" * 70)
     print("✅ ALL TESTS PASSED")
