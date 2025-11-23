@@ -288,13 +288,13 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
         print("="*70)
         
         if use_sparse:
-            print(f"\n⚡ Top-K Sparse Attention ENABLED")
+            print(f"\nTop-K Sparse Attention ENABLED")
             print(f"   Keep top: {top_k_percent*100:.0f}% of attention weights")
             print(f"   Expected speedup: 2-3x on attention layers")
             print(f"   Works during training: YES")
             print(f"   Recommended: Start training or fine-tune for best results")
         else:
-            print("\n📊 Standard Model (No Sparse Attention)")
+            print("\nStandard Model (No Sparse Attention)")
         
         print("="*70 + "\n")
         
