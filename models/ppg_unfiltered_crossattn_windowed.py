@@ -459,18 +459,29 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
     """
     
     def __init__(self, n_classes=4, d_model=256, n_heads=8, n_fusion_blocks=3, 
-                 dropout=0.2, noise_config=None, use_sparse=False, top_k_percent=0.10,
-                 positional_encoding='sinusoidal', max_len=5000, use_depthwise_separable=False,
-                 use_linear_attention=False):
+                 dropout=0.2, noise_config=None, attention_config=None,
+                 positional_encoding='sinusoidal', max_len=5000, depthwise_separable_conv=False):
         super(PPGUnfilteredWindowedCrossAttention, self).__init__()
         
         self.d_model = d_model
         self.n_classes = n_classes
-        self.use_sparse = use_sparse
-        self.top_k_percent = top_k_percent
         self.positional_encoding_type = positional_encoding
-        self.use_depthwise_separable = use_depthwise_separable
-        self.use_linear_attention = use_linear_attention
+        self.depthwise_separable_conv = depthwise_separable_conv
+        
+        # Parse attention config
+        attention_config = attention_config or {
+            'type': 'standard'
+        }
+        
+        self.attention_config = attention_config
+        self.attention_type = attention_config['type']
+        
+        # Determine sparse attention by presence of top_k_percent
+        self.top_k_percent = attention_config.get('top_k_percent', None)
+        self.use_sparse = self.top_k_percent is not None
+        
+        # Determine if using linear attention
+        use_linear_attention = self.attention_type == 'linear'
         
         # Print configuration
         print("\n" + "="*70)
@@ -478,15 +489,17 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
         print("="*70)
         
         # Attention type
+        print(f"\n🔹 Attention Configuration:")
+        print(f"   Type: {self.attention_type}")
         if use_linear_attention:
-            print(f"\n✨ LINEAR ATTENTION ENABLED (O(N) complexity)")
+            print(f"   ✓ Linear Attention (O(N) complexity)")
             print("   ✓ Efficient for long sequences")
             print("   ✓ Lower memory footprint")
             print("   ✓ Faster inference")
-        elif use_sparse:
-            print(f"\nTop-K Sparse Attention ENABLED (keep top {top_k_percent*100:.0f}%)")
+        elif self.use_sparse:
+            print(f"   ✓ Sparse Attention (keep top {self.top_k_percent*100:.0f}%)")
         else:
-            print("\nStandard Attention (O(N²) complexity)")
+            print("   ✓ Standard Attention (O(N²) complexity)")
         
         # Positional encoding
         print(f"\nPositional Encoding: {positional_encoding.upper()}")
@@ -496,7 +509,7 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
             print(f"   Type: Learned embeddings")
         
         # Depthwise separable convolutions
-        if use_depthwise_separable:
+        if depthwise_separable_conv:
             print(f"\nDepthwise Separable Convolutions: ENABLED")
         else:
             print(f"\nStandard Convolutions")
@@ -520,11 +533,11 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
         for i in range(len(encoder_channels) - 1):
             clean_ppg_encoder_blocks.append(
                 ResConvBlock(encoder_channels[i], encoder_channels[i + 1], 
-                           use_depthwise_separable=use_depthwise_separable)
+                           use_depthwise_separable=depthwise_separable_conv)
             )
             noisy_ppg_encoder_blocks.append(
                 ResConvBlock(encoder_channels[i], encoder_channels[i + 1],
-                           use_depthwise_separable=use_depthwise_separable)
+                           use_depthwise_separable=depthwise_separable_conv)
             )
         
         self.clean_ppg_encoder = nn.Sequential(*clean_ppg_encoder_blocks)
@@ -541,15 +554,15 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
         # Modality weighting
         self.modality_weighting = AdaptiveModalityWeighting(d_model)
         
-        # Cross-modal fusion blocks with linear attention support
+        # Cross-modal fusion blocks with attention config
         self.fusion_blocks = nn.ModuleList([
-            CrossModalFusionBlock(d_model, n_heads, dropout, use_sparse, top_k_percent, 
+            CrossModalFusionBlock(d_model, n_heads, dropout, self.use_sparse, self.top_k_percent, 
                                 use_linear_attention)
             for _ in range(n_fusion_blocks)
         ])
         
         # Feature aggregation
-        if use_depthwise_separable:
+        if depthwise_separable_conv:
             self.feature_aggregation = nn.Sequential(
                 DepthwiseSeparableConv1d(d_model * 2, d_model, kernel_size=1),
                 nn.BatchNorm1d(d_model),
@@ -565,15 +578,15 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
         # Temporal modeling
         self.temporal_blocks = nn.Sequential(
             TemporalBlock(d_model, d_model, kernel_size=7, stride=1, dilation=1, 
-                         dropout=dropout, use_depthwise_separable=use_depthwise_separable),
+                         dropout=dropout, use_depthwise_separable=depthwise_separable_conv),
             TemporalBlock(d_model, d_model, kernel_size=7, stride=1, dilation=2, 
-                         dropout=dropout, use_depthwise_separable=use_depthwise_separable),
+                         dropout=dropout, use_depthwise_separable=depthwise_separable_conv),
             TemporalBlock(d_model, d_model, kernel_size=7, stride=1, dilation=4, 
-                         dropout=dropout, use_depthwise_separable=use_depthwise_separable)
+                         dropout=dropout, use_depthwise_separable=depthwise_separable_conv)
         )
         
         # Feature refinement
-        if use_depthwise_separable:
+        if depthwise_separable_conv:
             self.feature_refinement = nn.Sequential(
                 DepthwiseSeparableConv1d(d_model, d_model, kernel_size=3, padding=1),
                 nn.BatchNorm1d(d_model),
@@ -589,7 +602,7 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
             )
         
         # Classifier
-        if use_depthwise_separable:
+        if depthwise_separable_conv:
             self.classifier = nn.Sequential(
                 DepthwiseSeparableConv1d(d_model, 128, kernel_size=1),
                 nn.BatchNorm1d(128),
@@ -770,7 +783,7 @@ def test_linear_attention():
         model = PPGUnfilteredWindowedCrossAttention(
             use_linear_attention=config['use_linear_attention'],
             use_sparse=config['use_sparse'],
-            use_depthwise_separable=config['use_depthwise_separable'],
+            depthwise_separable_conv=config['depthwise_separable_conv'],
             positional_encoding='sinusoidal'
         )
         model.eval()

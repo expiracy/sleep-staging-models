@@ -396,6 +396,12 @@ class PPGUnfilteredWindowedTrainer:
 
         # Create model
         print("\nCreating PPG Unfiltered Windowed Cross-Attention Model")
+        
+        # Prepare attention config (from model section or root for backward compatibility)
+        attention_config = self.config.get('model', {}).get('attention') or self.config.get('attention', {
+            'type': 'standard'
+        })
+        
         model = PPGUnfilteredWindowedCrossAttention(
             n_classes=4,
             d_model=self.config['model']['d_model'],
@@ -403,10 +409,9 @@ class PPGUnfilteredWindowedTrainer:
             n_fusion_blocks=self.config['model']['n_fusion_blocks'],
             dropout=self.config['model'].get('dropout', 0.2),
             noise_config=self.config.get('noise', None),
-            use_sparse=self.config.get('use_sparse', False),
-            top_k_percent=self.config.get('top_k_percent', 0.01),
+            attention_config=attention_config,
             positional_encoding=self.config['model'].get('positional_encoding', 'sinusoidal'),
-            use_depthwise_separable=self.config['model'].get('depthwise_separable_conv', False)
+            depthwise_separable_conv=self.config['model'].get('depthwise_separable_conv', False)
         ).to(self.device)
 
         print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -695,31 +700,52 @@ def main():
                         help='Path to configuration file')
     parser.add_argument('--runs', type=int, default=1,
                         help='Number of runs')
+    parser.add_argument('--attention_type', type=str, default=None,
+                        help='Attention type: standard, linear, sparse (overrides config)')
     parser.add_argument('--use_sparse', action='store_true',
-                        help='Enable threshold sparse attention optimization')
-    parser.add_argument('--top_k_percent', type=float, default=0.01,
-                        help='Top k percent for sparse attention (default: 0.01)')
-    parser.add_argument('--positional_encoding', type=str, default='learned',
-                        help='Type of positional encoding (default: learned)')
+                        help='Enable sparse attention (deprecated, use --attention_type sparse)')
+    parser.add_argument('--top_k_percent', type=float, default=None,
+                        help='Top k percent for sparse attention (overrides config)')
+    parser.add_argument('--positional_encoding', type=str, default=None,
+                        help='Type of positional encoding: sinusoidal or learned (overrides config)')
     parser.add_argument('--depthwise_separable_conv', action='store_true', default=False,
-                        help='Use depthwise separable convolutions in model')
+                        help='Use depthwise separable convolutions in model (overrides config)')
     args = parser.parse_args()
 
     # Load configuration
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
     
-    # Add sparse attention parameters from command line args
-    if args.use_sparse:
-        config['use_sparse'] = True
-        config['top_k_percent'] = args.top_k_percent
-        print(f"\n⚡ Sparse Attention Enabled: top_k_percent={args.top_k_percent}")
+    # Initialize attention config if not present
+    if 'attention' not in config.get('model', {}):
+        if 'model' not in config:
+            config['model'] = {}
+        config['model']['attention'] = {
+            'type': 'standard'
+        }
     
-    # Add positional encoding and depthwise separable conv from command line args
-    config['model']['positional_encoding'] = args.positional_encoding
-    config['model']['depthwise_separable_conv'] = args.depthwise_separable_conv
+    # Command line args override config
+    if args.attention_type:
+        config['model']['attention']['type'] = args.attention_type
+        print(f"\n🔹 Attention Type (from CLI): {args.attention_type}")
+    
+    if args.use_sparse:
+        config['model']['attention']['type'] = 'sparse'
+        if args.top_k_percent is None:
+            config['model']['attention']['top_k_percent'] = 0.10
+        print(f"\n⚡ Sparse Attention Enabled (from CLI)")
+    
+    if args.top_k_percent is not None:
+        config['model']['attention']['top_k_percent'] = args.top_k_percent
+        print(f"\n⚡ Top-K Percent: {args.top_k_percent}")
+    
+    # Model configuration overrides
+    if args.positional_encoding:
+        config['model']['positional_encoding'] = args.positional_encoding
+        print(f"\n📍 Positional Encoding (from CLI): {args.positional_encoding}")
     
     if args.depthwise_separable_conv:
+        config['model']['depthwise_separable_conv'] = True
         print(f"\n🔧 Depthwise Separable Convolutions Enabled")
 
     # Multiple runs
