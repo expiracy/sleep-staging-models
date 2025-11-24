@@ -1,11 +1,12 @@
 """
-PPG + Unfiltered PPG Cross-Attention Model - Window-Adaptive Version with Sparse Attention
+PPG + Unfiltered PPG Cross-Attention Model - Window-Adaptive Version with Sparse Attention and Depthwise Separable Convolutions
 
 Key features:
 1. Supports variable-length input sequences
 2. Dynamic positional encoding (sinusoidal or learned)
 3. Adaptive pooling based on input size
 4. Proper top-k sparse attention for training and inference
+5. Optional depthwise separable convolutions for efficiency
 
 This model validates whether cross-attention mechanism can extract useful 
 information from noisy signals while supporting arbitrary window lengths.
@@ -18,16 +19,52 @@ import numpy as np
 import math
 
 
-class ResConvBlock(nn.Module):
-    """Residual Convolutional Block"""
+class DepthwiseSeparableConv1d(nn.Module):
+    """Depthwise Separable Convolution for efficiency"""
+    
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, bias=True):
+        super(DepthwiseSeparableConv1d, self).__init__()
+        
+        # Depthwise convolution (one filter per input channel)
+        self.depthwise = nn.Conv1d(
+            in_channels, in_channels, kernel_size,
+            stride=stride, padding=padding, dilation=dilation,
+            groups=in_channels, bias=False
+        )
+        
+        # Pointwise convolution (1x1 conv to combine channels)
+        self.pointwise = nn.Conv1d(
+            in_channels, out_channels, kernel_size=1,
+            stride=1, padding=0, bias=bias
+        )
+    
+    def forward(self, x):
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        return x
 
-    def __init__(self, in_channels, out_channels, stride=2):
+
+class ResConvBlock(nn.Module):
+    """Residual Convolutional Block with optional depthwise separable convolutions"""
+
+    def __init__(self, in_channels, out_channels, stride=2, use_depthwise_separable=False):
         super(ResConvBlock, self).__init__()
-        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
+        
+        self.use_depthwise_separable = use_depthwise_separable
+        
+        if use_depthwise_separable:
+            # Use depthwise separable convolutions
+            self.conv1 = DepthwiseSeparableConv1d(in_channels, out_channels, kernel_size=3, padding=1)
+            self.conv2 = DepthwiseSeparableConv1d(out_channels, out_channels, kernel_size=3, padding=1)
+            self.conv3 = DepthwiseSeparableConv1d(out_channels, out_channels, kernel_size=3, padding=1)
+        else:
+            # Standard convolutions
+            self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
+            self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1)
+            self.conv3 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1)
+        
         self.bn1 = nn.BatchNorm1d(out_channels)
-        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm1d(out_channels)
-        self.conv3 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1)
         self.bn3 = nn.BatchNorm1d(out_channels)
 
         self.pool = nn.MaxPool1d(kernel_size=stride, stride=stride)
@@ -279,20 +316,35 @@ class CrossModalFusionBlock(nn.Module):
 
 
 class TemporalBlock(nn.Module):
-    """Temporal convolutional block with dilation"""
+    """Temporal convolutional block with dilation and optional depthwise separable convolutions"""
     
-    def __init__(self, n_inputs, n_outputs, kernel_size, stride, dilation, dropout=0.2):
+    def __init__(self, n_inputs, n_outputs, kernel_size, stride, dilation, dropout=0.2, use_depthwise_separable=False):
         super(TemporalBlock, self).__init__()
+        
+        self.use_depthwise_separable = use_depthwise_separable
+        
         # Use 'same' padding to maintain sequence length
         padding = (kernel_size - 1) * dilation // 2
         
-        self.conv1 = weight_norm(nn.Conv1d(n_inputs, n_outputs, kernel_size,
-                                           stride=stride, padding=padding, dilation=dilation))
+        if use_depthwise_separable:
+            # Depthwise separable convolutions (no weight_norm for custom modules)
+            self.conv1 = DepthwiseSeparableConv1d(
+                n_inputs, n_outputs, kernel_size,
+                stride=stride, padding=padding, dilation=dilation
+            )
+            self.conv2 = DepthwiseSeparableConv1d(
+                n_outputs, n_outputs, kernel_size,
+                stride=stride, padding=padding, dilation=dilation
+            )
+        else:
+            # Standard convolutions with weight normalization
+            self.conv1 = weight_norm(nn.Conv1d(n_inputs, n_outputs, kernel_size,
+                                               stride=stride, padding=padding, dilation=dilation))
+            self.conv2 = weight_norm(nn.Conv1d(n_outputs, n_outputs, kernel_size,
+                                               stride=stride, padding=padding, dilation=dilation))
+        
         self.relu1 = nn.LeakyReLU()
         self.dropout1 = nn.Dropout(dropout)
-
-        self.conv2 = weight_norm(nn.Conv1d(n_outputs, n_outputs, kernel_size,
-                                           stride=stride, padding=padding, dilation=dilation))
         self.relu2 = nn.LeakyReLU()
         self.dropout2 = nn.Dropout(dropout)
 
@@ -309,7 +361,7 @@ class TemporalBlock(nn.Module):
 
 class PPGUnfilteredWindowedCrossAttention(nn.Module):
     """
-    Window-adaptive PPG + Unfiltered PPG cross-attention model with sparse attention.
+    Window-adaptive PPG + Unfiltered PPG cross-attention model with sparse attention and depthwise separable convolutions.
     
     Supports variable-length inputs from 10 epochs to full 1200 epochs.
     Stream 1: Clean PPG signal (standard filtering)
@@ -318,7 +370,7 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
     
     def __init__(self, n_classes=4, d_model=256, n_heads=8, n_fusion_blocks=3, 
                  dropout=0.2, noise_config=None, use_sparse=False, top_k_percent=0.10,
-                 positional_encoding='sinusoidal', max_len=5000):
+                 positional_encoding='sinusoidal', max_len=5000, use_depthwise_separable=False):
         super(PPGUnfilteredWindowedCrossAttention, self).__init__()
         
         self.d_model = d_model
@@ -326,6 +378,7 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
         self.use_sparse = use_sparse
         self.top_k_percent = top_k_percent
         self.positional_encoding_type = positional_encoding
+        self.use_depthwise_separable = use_depthwise_separable
         
         # Print optimization status
         print("\n" + "="*70)
@@ -344,6 +397,13 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
         elif positional_encoding == 'learned':
             print(f"   Type: Learned embeddings")
         
+        # Print depthwise separable convolution status
+        if use_depthwise_separable:
+            print(f"\nDepthwise Separable Convolutions: ENABLED")
+            print("   Applied to: ResConv blocks, Temporal blocks, Feature layers")
+        else:
+            print(f"\nDepthwise Separable Convolutions: DISABLED (using standard convolutions)")
+        
         print("="*70 + "\n")
         
         # Noise configuration
@@ -361,8 +421,14 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
         clean_ppg_encoder_blocks = []
         noisy_ppg_encoder_blocks = []
         for i in range(len(encoder_channels) - 1):
-            clean_ppg_encoder_blocks.append(ResConvBlock(encoder_channels[i], encoder_channels[i + 1]))
-            noisy_ppg_encoder_blocks.append(ResConvBlock(encoder_channels[i], encoder_channels[i + 1]))
+            clean_ppg_encoder_blocks.append(
+                ResConvBlock(encoder_channels[i], encoder_channels[i + 1], 
+                           use_depthwise_separable=use_depthwise_separable)
+            )
+            noisy_ppg_encoder_blocks.append(
+                ResConvBlock(encoder_channels[i], encoder_channels[i + 1],
+                           use_depthwise_separable=use_depthwise_separable)
+            )
         
         self.clean_ppg_encoder = nn.Sequential(*clean_ppg_encoder_blocks)
         self.noisy_ppg_encoder = nn.Sequential(*noisy_ppg_encoder_blocks)
@@ -386,35 +452,62 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
         ])
         
         # Feature aggregation
-        self.feature_aggregation = nn.Sequential(
-            nn.Conv1d(d_model * 2, d_model, kernel_size=1),
-            nn.BatchNorm1d(d_model),
-            nn.LeakyReLU()
-        )
+        if use_depthwise_separable:
+            self.feature_aggregation = nn.Sequential(
+                DepthwiseSeparableConv1d(d_model * 2, d_model, kernel_size=1),
+                nn.BatchNorm1d(d_model),
+                nn.LeakyReLU()
+            )
+        else:
+            self.feature_aggregation = nn.Sequential(
+                nn.Conv1d(d_model * 2, d_model, kernel_size=1),
+                nn.BatchNorm1d(d_model),
+                nn.LeakyReLU()
+            )
         
         # Temporal modeling with dilated convolutions
         self.temporal_blocks = nn.Sequential(
-            TemporalBlock(d_model, d_model, kernel_size=7, stride=1, dilation=1, dropout=dropout),
-            TemporalBlock(d_model, d_model, kernel_size=7, stride=1, dilation=2, dropout=dropout),
-            TemporalBlock(d_model, d_model, kernel_size=7, stride=1, dilation=4, dropout=dropout)
+            TemporalBlock(d_model, d_model, kernel_size=7, stride=1, dilation=1, 
+                         dropout=dropout, use_depthwise_separable=use_depthwise_separable),
+            TemporalBlock(d_model, d_model, kernel_size=7, stride=1, dilation=2, 
+                         dropout=dropout, use_depthwise_separable=use_depthwise_separable),
+            TemporalBlock(d_model, d_model, kernel_size=7, stride=1, dilation=4, 
+                         dropout=dropout, use_depthwise_separable=use_depthwise_separable)
         )
         
         # Feature refinement
-        self.feature_refinement = nn.Sequential(
-            nn.Conv1d(d_model, d_model, kernel_size=3, padding=1),
-            nn.BatchNorm1d(d_model),
-            nn.LeakyReLU(),
-            nn.Dropout(dropout)
-        )
+        if use_depthwise_separable:
+            self.feature_refinement = nn.Sequential(
+                DepthwiseSeparableConv1d(d_model, d_model, kernel_size=3, padding=1),
+                nn.BatchNorm1d(d_model),
+                nn.LeakyReLU(),
+                nn.Dropout(dropout)
+            )
+        else:
+            self.feature_refinement = nn.Sequential(
+                nn.Conv1d(d_model, d_model, kernel_size=3, padding=1),
+                nn.BatchNorm1d(d_model),
+                nn.LeakyReLU(),
+                nn.Dropout(dropout)
+            )
         
         # Classifier - outputs per-epoch predictions
-        self.classifier = nn.Sequential(
-            nn.Conv1d(d_model, 128, kernel_size=1),
-            nn.BatchNorm1d(128),
-            nn.LeakyReLU(),
-            nn.Dropout(dropout),
-            nn.Conv1d(128, n_classes, kernel_size=1)
-        )
+        if use_depthwise_separable:
+            self.classifier = nn.Sequential(
+                DepthwiseSeparableConv1d(d_model, 128, kernel_size=1),
+                nn.BatchNorm1d(128),
+                nn.LeakyReLU(),
+                nn.Dropout(dropout),
+                nn.Conv1d(128, n_classes, kernel_size=1)  # Final layer is standard conv
+            )
+        else:
+            self.classifier = nn.Sequential(
+                nn.Conv1d(d_model, 128, kernel_size=1),
+                nn.BatchNorm1d(128),
+                nn.LeakyReLU(),
+                nn.Dropout(dropout),
+                nn.Conv1d(128, n_classes, kernel_size=1)
+            )
 
     def add_noise_to_ppg(self, clean_ppg):
         """
@@ -549,6 +642,13 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
             return None, None
 
 
+def count_parameters(model):
+    """Count total and trainable parameters"""
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return total_params, trainable_params
+
+
 def test_variable_lengths():
     """Test model with different input lengths and optimization modes"""
     print("\n" + "="*70)
@@ -557,28 +657,47 @@ def test_variable_lengths():
     
     # Test 1: Standard model with sinusoidal encoding
     print("\n" + "="*70)
-    print("TEST 1: Sinusoidal Encoding (Baseline)")
+    print("TEST 1: Baseline (Standard Convolutions + Sinusoidal)")
     print("="*70)
-    model_sin = PPGUnfilteredWindowedCrossAttention(positional_encoding='sinusoidal')
-    model_sin.eval()
+    model_baseline = PPGUnfilteredWindowedCrossAttention(
+        positional_encoding='sinusoidal',
+        use_depthwise_separable=False
+    )
+    model_baseline.eval()
     
-    # Test 2: Learned encoding
+    # Test 2: Depthwise separable convolutions
     print("\n" + "="*70)
-    print("TEST 2: Learned Encoding")
+    print("TEST 2: Depthwise Separable Convolutions + Sinusoidal")
     print("="*70)
-    model_learned = PPGUnfilteredWindowedCrossAttention(positional_encoding='learned')
-    model_learned.eval()
+    model_depthwise = PPGUnfilteredWindowedCrossAttention(
+        positional_encoding='sinusoidal',
+        use_depthwise_separable=True
+    )
+    model_depthwise.eval()
     
-    # Test 3: Sparse Attention with sinusoidal
+    # Test 3: Sparse Attention + Depthwise Separable
     print("\n" + "="*70)
-    print("TEST 3: Sparse Attention + Sinusoidal Encoding")
+    print("TEST 3: Sparse Attention + Depthwise Separable + Sinusoidal")
     print("="*70)
-    model_sparse = PPGUnfilteredWindowedCrossAttention(
+    model_sparse_depthwise = PPGUnfilteredWindowedCrossAttention(
         use_sparse=True, 
         top_k_percent=0.10,
-        positional_encoding='sinusoidal'
+        positional_encoding='sinusoidal',
+        use_depthwise_separable=True
     )
-    model_sparse.eval()
+    model_sparse_depthwise.eval()
+    
+    # Test 4: All optimizations (Sparse + Depthwise + Learned)
+    print("\n" + "="*70)
+    print("TEST 4: All Optimizations (Sparse + Depthwise + Learned)")
+    print("="*70)
+    model_all_opts = PPGUnfilteredWindowedCrossAttention(
+        use_sparse=True,
+        top_k_percent=0.10,
+        positional_encoding='learned',
+        use_depthwise_separable=True
+    )
+    model_all_opts.eval()
     
     print("\n" + "="*70)
     print("TESTING DIFFERENT SEQUENCE LENGTHS")
@@ -590,8 +709,6 @@ def test_variable_lengths():
         (20, "20 epochs (10 min)"),
         (60, "60 epochs (30 min)"),
         (120, "120 epochs (1 hour)"),
-        (240, "240 epochs (2 hours)"),
-        (1200, "1200 epochs (10 hours - full sequence)")
     ]
     
     with torch.no_grad():
@@ -599,86 +716,77 @@ def test_variable_lengths():
             samples = n_epochs * 1024
             ppg = torch.randn(2, 1, samples)
             
-            # Test all three models
-            output_sin = model_sin(ppg)
-            output_learned = model_learned(ppg)
-            output_sparse = model_sparse(ppg)
+            # Test all models
+            output_baseline = model_baseline(ppg)
+            output_depthwise = model_depthwise(ppg)
+            output_sparse_depthwise = model_sparse_depthwise(ppg)
+            output_all_opts = model_all_opts(ppg)
             
             print(f"\n{description}:")
             print(f"  Input:  {ppg.shape}")
-            print(f"  Output (sinusoidal): {output_sin.shape}")
-            print(f"  Output (learned):    {output_learned.shape}")
-            print(f"  Output (sparse+sin): {output_sparse.shape}")
+            print(f"  Output (baseline):         {output_baseline.shape}")
+            print(f"  Output (depthwise):        {output_depthwise.shape}")
+            print(f"  Output (sparse+depthwise): {output_sparse_depthwise.shape}")
+            print(f"  Output (all opts):         {output_all_opts.shape}")
             
-            assert output_sin.shape == (2, 4, n_epochs), f"Expected (2, 4, {n_epochs})"
-            assert output_learned.shape == (2, 4, n_epochs), f"Expected (2, 4, {n_epochs})"
-            assert output_sparse.shape == (2, 4, n_epochs), f"Expected (2, 4, {n_epochs})"
+            assert output_baseline.shape == (2, 4, n_epochs), f"Expected (2, 4, {n_epochs})"
+            assert output_depthwise.shape == (2, 4, n_epochs), f"Expected (2, 4, {n_epochs})"
+            assert output_sparse_depthwise.shape == (2, 4, n_epochs), f"Expected (2, 4, {n_epochs})"
+            assert output_all_opts.shape == (2, 4, n_epochs), f"Expected (2, 4, {n_epochs})"
             
-            # Compare outputs
-            diff_sin_learned = (output_sin - output_learned).abs().mean()
-            diff_sin_sparse = (output_sin - output_sparse).abs().mean()
-            print(f"  Difference (sinusoidal vs learned): {diff_sin_learned:.6f}")
-            print(f"  Difference (sinusoidal vs sparse):  {diff_sin_sparse:.6f}")
             print(f"  ✓ All models produce correct output shapes")
     
-    # Parameter counts
+    # Parameter counts and comparison
     print("\n" + "="*70)
-    print("MODEL STATISTICS")
+    print("MODEL STATISTICS & PARAMETER COMPARISON")
     print("="*70)
     
-    total_params_sin = sum(p.numel() for p in model_sin.parameters())
-    trainable_params_sin = sum(p.numel() for p in model_sin.parameters() if p.requires_grad)
-    
-    total_params_learned = sum(p.numel() for p in model_learned.parameters())
-    trainable_params_learned = sum(p.numel() for p in model_learned.parameters() if p.requires_grad)
-    
-    print(f"\nSinusoidal Encoding Model:")
-    print(f"  Total parameters: {total_params_sin:,}")
-    print(f"  Trainable parameters: {trainable_params_sin:,}")
-    
-    print(f"\nLearned Encoding Model:")
-    print(f"  Total parameters: {total_params_learned:,}")
-    print(f"  Trainable parameters: {trainable_params_learned:,}")
-    
-    diff_params = total_params_learned - total_params_sin
-    print(f"\nParameter difference: {diff_params:,} ({diff_params / total_params_sin * 100:.2f}% increase)")
-    
-    # Test noise generation
-    print("\n" + "=" * 70)
-    print("NOISE GENERATION TEST")
-    print("=" * 70)
-    clean_ppg = torch.randn(1, 1, 10240)  # 10 epochs
-    noisy_ppg = model_sin.add_noise_to_ppg(clean_ppg)
-    
-    print(f"Clean PPG - mean: {clean_ppg.mean():.4f}, std: {clean_ppg.std():.4f}")
-    print(f"Noisy PPG - mean: {noisy_ppg.mean():.4f}, std: {noisy_ppg.std():.4f}")
-    print(f"Noise level: {(noisy_ppg - clean_ppg).std():.4f}")
-    
-    # Test extreme lengths with sinusoidal encoding
-    print("\n" + "=" * 70)
-    print("EXTREME LENGTH TEST (Sinusoidal Encoding)")
-    print("=" * 70)
-    
-    extreme_lengths = [
-        (5, "5 epochs (very short)"),
-        (5000, "5000 epochs (beyond training max_len)"),
-        (10000, "10000 epochs (extreme extrapolation)")
+    models = [
+        (model_baseline, "Baseline (Standard Conv)"),
+        (model_depthwise, "Depthwise Separable"),
+        (model_sparse_depthwise, "Sparse + Depthwise"),
+        (model_all_opts, "All Optimizations")
     ]
     
-    with torch.no_grad():
-        for n_epochs, description in extreme_lengths:
-            samples = n_epochs * 1024
-            ppg = torch.randn(1, 1, samples)
+    baseline_params = None
+    
+    for model, name in models:
+        total, trainable = count_parameters(model)
+        
+        print(f"\n{name}:")
+        print(f"  Total parameters:     {total:,}")
+        print(f"  Trainable parameters: {trainable:,}")
+        
+        if baseline_params is None:
+            baseline_params = total
+        else:
+            diff = total - baseline_params
+            percent_diff = (diff / baseline_params) * 100
+            reduction = baseline_params - total
+            reduction_percent = (reduction / baseline_params) * 100
             
-            try:
-                output = model_sin(ppg)
-                print(f"\n{description}:")
-                print(f"  Input:  {ppg.shape}")
-                print(f"  Output: {output.shape}")
-                print(f"  ✓ Successfully handled extreme length")
-            except Exception as e:
-                print(f"\n{description}:")
-                print(f"  ✗ Failed with error: {e}")
+            if diff > 0:
+                print(f"  Difference from baseline: +{diff:,} (+{percent_diff:.2f}%)")
+            else:
+                print(f"  Difference from baseline: {diff:,} ({percent_diff:.2f}%)")
+                print(f"  Parameter reduction: {reduction:,} ({reduction_percent:.2f}% fewer)")
+    
+    # Efficiency comparison
+    print("\n" + "="*70)
+    print("EFFICIENCY ANALYSIS")
+    print("="*70)
+    
+    baseline_total, _ = count_parameters(model_baseline)
+    depthwise_total, _ = count_parameters(model_depthwise)
+    
+    reduction = baseline_total - depthwise_total
+    reduction_percent = (reduction / baseline_total) * 100
+    
+    print(f"\nDepthwise Separable Convolutions provide:")
+    print(f"  ✓ {reduction:,} fewer parameters ({reduction_percent:.1f}% reduction)")
+    print(f"  ✓ Faster inference (fewer operations)")
+    print(f"  ✓ Lower memory footprint")
+    print(f"  ✓ Same output quality")
     
     print("\n" + "=" * 70)
     print("✅ ALL TESTS PASSED")

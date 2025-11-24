@@ -404,7 +404,9 @@ class PPGUnfilteredWindowedTrainer:
             dropout=self.config['model'].get('dropout', 0.2),
             noise_config=self.config.get('noise', None),
             use_sparse=self.config.get('use_sparse', False),
-            top_k_percent=self.config.get('top_k_percent', 0.01)
+            top_k_percent=self.config.get('top_k_percent', 0.01),
+            positional_encoding=self.config['model'].get('positional_encoding', 'sinusoidal'),
+            use_depthwise_separable=self.config['model'].get('depthwise_separable_conv', False)
         ).to(self.device)
 
         print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -699,6 +701,8 @@ def main():
                         help='Top k percent for sparse attention (default: 0.01)')
     parser.add_argument('--positional_encoding', type=str, default='learned',
                         help='Type of positional encoding (default: learned)')
+    parser.add_argument('--depthwise_separable_conv', action='store_true', default=False,
+                        help='Use depthwise separable convolutions in model')
     args = parser.parse_args()
 
     # Load configuration
@@ -711,7 +715,12 @@ def main():
         config['top_k_percent'] = args.top_k_percent
         print(f"\n⚡ Sparse Attention Enabled: top_k_percent={args.top_k_percent}")
     
+    # Add positional encoding and depthwise separable conv from command line args
     config['model']['positional_encoding'] = args.positional_encoding
+    config['model']['depthwise_separable_conv'] = args.depthwise_separable_conv
+    
+    if args.depthwise_separable_conv:
+        print(f"\n🔧 Depthwise Separable Convolutions Enabled")
 
     # Multiple runs
     n_runs = args.runs
