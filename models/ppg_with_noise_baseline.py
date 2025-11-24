@@ -34,6 +34,9 @@ class PPGWithNoiseBaseline(nn.Module):
 
         self.model_type = ModelType.PPG_WITH_NOISE
 
+    def get_name(self):
+        return "PPGWithNoiseBaseline"
+
     def add_noise_to_ppg(self, clean_ppg):
         """
         Add noise to clean PPG signal (exact same implementation as dual-stream model)

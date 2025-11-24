@@ -78,6 +78,9 @@ class PPGUnfilteredCrossAttention(nn.Module):
 
         self.model_type = ModelType.PPG_UNFILTERED
 
+    def get_name(self):
+        return "PPGUnfilteredCrossAttention"
+
     def _create_encoder(self, d_model):
         """Create encoder"""
         from .multimodal_model_crossattn import ResConvBlock
