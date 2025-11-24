@@ -23,7 +23,6 @@ model:
 
   # Attention mechanism configuration
   attention:
-    type: sparse  # SPARSE ATTENTION for reduced memory
     top_k_percent: 0.10  # Keep top 10% of attention weights
 
 windowing:
