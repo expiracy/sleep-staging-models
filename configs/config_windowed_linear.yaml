@@ -18,11 +18,11 @@ model:
   n_heads: 8
   n_fusion_blocks: 3
   dropout: 0.1
-  positional_encoding: sinusoidal  # Options: sinusoidal, learned
+  positional_encoding: sinusoidal  
   depthwise_separable_conv: false
-  # Attention mechanism configuration
+
   attention:
-    type: linear  # LINEAR ATTENTION for O(N) complexity
+    type: linear  
 
 windowing:
   window_epochs: 180
