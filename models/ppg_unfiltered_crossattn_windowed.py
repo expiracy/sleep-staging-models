@@ -250,17 +250,19 @@ class LinearAttention(nn.Module):
 class MultiHeadCrossAttention(nn.Module):
     """Multi-Head Cross-Attention with optional sparse attention or linear attention"""
 
-    def __init__(self, d_model, n_heads=8, dropout=0.1, use_sparse=False, top_k_percent=0.10, 
-                 use_linear=False):
+    def __init__(self, d_model, n_heads=8, dropout=0.1, attention_config=None):
         super(MultiHeadCrossAttention, self).__init__()
         self.d_model = d_model
         self.n_heads = n_heads
         self.d_k = d_model // n_heads
-        self.use_sparse = use_sparse
-        self.top_k_percent = top_k_percent
-        self.use_linear = use_linear
+        
+        # Parse attention config
+        attention_config = attention_config or {'type': 'standard'}
+        self.attention_type = attention_config.get('type', 'standard')
+        self.top_k_percent = attention_config.get('top_k_percent', None)
+        self.use_linear = self.attention_type == 'linear'
 
-        if use_linear:
+        if self.use_linear:
             # Use linear attention
             self.attention = LinearAttention(d_model, n_heads, dropout)
         else:
@@ -273,8 +275,8 @@ class MultiHeadCrossAttention(nn.Module):
             self.dropout = nn.Dropout(dropout)
             self.layer_norm = nn.LayerNorm(d_model)
             
-            if self.use_sparse:
-                print(f"  ✓ Using Top-K Sparse Attention (keep top {top_k_percent*100:.0f}%)")
+            if self.top_k_percent is not None:
+                print(f"  ✓ Using Top-K Sparse Attention (keep top {self.top_k_percent*100:.0f}%)")
 
     def forward(self, query, key, value, mask=None):
         if self.use_linear:
@@ -301,7 +303,7 @@ class MultiHeadCrossAttention(nn.Module):
             scores = scores.masked_fill(mask == 0, -1e9)
         
         # Top-K sparsification
-        if self.use_sparse:
+        if self.top_k_percent is not None:
             key_len = scores.size(-1)
             top_k = max(1, int(key_len * self.top_k_percent))
             
@@ -363,17 +365,16 @@ class AdaptiveModalityWeighting(nn.Module):
 class CrossModalFusionBlock(nn.Module):
     """Cross-modal fusion using bidirectional cross-attention"""
 
-    def __init__(self, d_model, n_heads=8, dropout=0.1, use_sparse=False, top_k_percent=0.10,
-                 use_linear=False):
+    def __init__(self, d_model, n_heads=8, dropout=0.1, attention_config=None):
         super(CrossModalFusionBlock, self).__init__()
         
         # Clean PPG attends to Noisy PPG
         self.clean_cross_attn = MultiHeadCrossAttention(
-            d_model, n_heads, dropout, use_sparse, top_k_percent, use_linear
+            d_model, n_heads, dropout, attention_config
         )
         # Noisy PPG attends to Clean PPG
         self.noisy_cross_attn = MultiHeadCrossAttention(
-            d_model, n_heads, dropout, use_sparse, top_k_percent, use_linear
+            d_model, n_heads, dropout, attention_config
         )
         
         # Feed-forward networks
@@ -475,10 +476,7 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
         
         self.attention_config = attention_config
         self.attention_type = attention_config['type']
-        
-        # Determine sparse attention by presence of top_k_percent
         self.top_k_percent = attention_config.get('top_k_percent', None)
-        self.use_sparse = self.top_k_percent is not None
         
         # Determine if using linear attention
         use_linear_attention = self.attention_type == 'linear'
@@ -496,7 +494,7 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
             print("   ✓ Efficient for long sequences")
             print("   ✓ Lower memory footprint")
             print("   ✓ Faster inference")
-        elif self.use_sparse:
+        elif self.top_k_percent is not None:
             print(f"   ✓ Sparse Attention (keep top {self.top_k_percent*100:.0f}%)")
         else:
             print("   ✓ Standard Attention (O(N²) complexity)")
@@ -556,8 +554,7 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
         
         # Cross-modal fusion blocks with attention config
         self.fusion_blocks = nn.ModuleList([
-            CrossModalFusionBlock(d_model, n_heads, dropout, self.use_sparse, self.top_k_percent, 
-                                use_linear_attention)
+            CrossModalFusionBlock(d_model, n_heads, dropout, attention_config)
             for _ in range(n_fusion_blocks)
         ])
         
@@ -750,27 +747,23 @@ def test_linear_attention():
     configs = [
         {
             'name': 'Baseline (Standard Attention)',
-            'use_linear_attention': False,
-            'use_sparse': False,
-            'use_depthwise_separable': False,
+            'attention_config': {'type': 'standard'},
+            'depthwise_separable_conv': False,
         },
         {
             'name': 'Linear Attention Only',
-            'use_linear_attention': True,
-            'use_sparse': False,
-            'use_depthwise_separable': False,
+            'attention_config': {'type': 'linear'},
+            'depthwise_separable_conv': False,
         },
         {
             'name': 'Linear Attention + Depthwise',
-            'use_linear_attention': True,
-            'use_sparse': False,
-            'use_depthwise_separable': True,
+            'attention_config': {'type': 'linear'},
+            'depthwise_separable_conv': True,
         },
         {
             'name': 'Sparse Attention + Depthwise',
-            'use_linear_attention': False,
-            'use_sparse': True,
-            'use_depthwise_separable': True,
+            'attention_config': {'type': 'standard', 'top_k_percent': 0.10},
+            'depthwise_separable_conv': True,
         },
     ]
     
@@ -781,8 +774,7 @@ def test_linear_attention():
         print("="*70)
         
         model = PPGUnfilteredWindowedCrossAttention(
-            use_linear_attention=config['use_linear_attention'],
-            use_sparse=config['use_sparse'],
+            attention_config=config['attention_config'],
             depthwise_separable_conv=config['depthwise_separable_conv'],
             positional_encoding='sinusoidal'
         )
