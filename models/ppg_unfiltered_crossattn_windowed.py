@@ -671,11 +671,15 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
 
     def get_name(self):
         base_name = "PPGUnfilteredWindowedCrossAttention"
+        base_name += "attention_config\{"
         for key, value in self.attention_config.items():
             base_name += f"[{key}:{value}]"
+        base_name += "}"
         
         if self.depthwise_separable_conv:
-            base_name += "[DepthwiseSeparableConv]"
+            base_name += "[depthwise_separable_conv]"
+        
+        base_name += f"[positional_encoding:{self.positional_encoding_type}]"
 
         return base_name
 
