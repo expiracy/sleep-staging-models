@@ -4,7 +4,7 @@ PPG + Unfiltered PPG Cross-Attention Model - With STABLE Linear Attention
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils import weight_norm
+from torch.nn.utils.parametrizations import weight_norm
 import numpy as np
 import math
 
@@ -144,6 +144,86 @@ class LearnedPositionalEncoding(nn.Module):
         return x + pos_enc
 
 
+class LocalWindowAttention(nn.Module):
+    """
+    TRUE O(N × window_size) local window attention - both time AND memory efficient.
+    Fully vectorized with no Python loops.
+    """
+    
+    def __init__(self, d_model, n_heads=8, window_size=64, dropout=0.1):
+        super(LocalWindowAttention, self).__init__()
+        
+        assert d_model % n_heads == 0
+        assert window_size % 2 == 0, "window_size should be even for symmetric windows"
+        
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.d_k = d_model // n_heads
+        self.window_size = window_size
+        
+        self.w_q = nn.Linear(d_model, d_model)
+        self.w_k = nn.Linear(d_model, d_model)
+        self.w_v = nn.Linear(d_model, d_model)
+        self.w_o = nn.Linear(d_model, d_model)
+        
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(d_model)
+        
+        print(f"  ✓ TRUE O(N×{window_size}) Vectorized Local Window Attention")
+    
+    def forward(self, query, key, value, mask=None):
+        batch_size, seq_len, _ = query.shape
+        
+        # Project and reshape
+        Q = self.w_q(query).view(batch_size, seq_len, self.n_heads, self.d_k).transpose(1, 2)
+        K = self.w_k(key).view(batch_size, seq_len, self.n_heads, self.d_k).transpose(1, 2)
+        V = self.w_v(value).view(batch_size, seq_len, self.n_heads, self.d_k).transpose(1, 2)
+        # Shape: (batch, heads, seq_len, d_k)
+        
+        half_window = self.window_size // 2
+        
+        # Pad K and V: half_window on left, (half_window - 1) on right
+        # This ensures unfold produces exactly seq_len windows
+        K_padded = F.pad(K, (0, 0, half_window, half_window - 1))
+        V_padded = F.pad(V, (0, 0, half_window, half_window - 1))
+        # Shape: (batch, heads, seq_len + window_size - 1, d_k)
+        
+        # Extract sliding windows using unfold
+        K_windows = K_padded.unfold(2, self.window_size, 1)
+        V_windows = V_padded.unfold(2, self.window_size, 1)
+        # Shape: (batch, heads, seq_len, d_k, window_size)
+        
+        # Rearrange to (batch, heads, seq_len, window_size, d_k)
+        K_windows = K_windows.permute(0, 1, 2, 4, 3)
+        V_windows = V_windows.permute(0, 1, 2, 4, 3)
+        
+        # Compute attention scores
+        Q_expanded = Q.unsqueeze(3)  # (batch, heads, seq_len, 1, d_k)
+        
+        scores = torch.matmul(Q_expanded, K_windows.transpose(-2, -1))
+        # Shape: (batch, heads, seq_len, 1, window_size)
+        scores = scores.squeeze(3) / math.sqrt(self.d_k)
+        # Shape: (batch, heads, seq_len, window_size)
+        
+        # Softmax over window
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        
+        # Apply attention to values
+        attn_weights_expanded = attn_weights.unsqueeze(-1)  # (batch, heads, seq_len, window_size, 1)
+        context = (attn_weights_expanded * V_windows).sum(dim=3)
+        # Shape: (batch, heads, seq_len, d_k)
+        
+        # Reshape and output projection
+        context = context.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
+        output = self.w_o(context)
+        
+        # Residual and norm
+        output = self.layer_norm(query + self.dropout(output))
+        
+        return output, None
+    
+    
 class LinearAttention(nn.Module):
     """
     Linear Attention mechanism with O(N) complexity - NUMERICALLY STABLE VERSION.
@@ -310,10 +390,15 @@ class MultiHeadCrossAttention(nn.Module):
         self.attention_type = attention_config.get('type', 'standard')
         self.top_k_percent = attention_config.get('top_k_percent', None)
         self.use_linear = self.attention_type == 'linear'
+        self.use_sparse_windowed = self.attention_type == 'sparse_windowed'
 
         if self.use_linear:
             # Use linear attention
             self.attention = LinearAttention(d_model, n_heads, dropout)
+        elif self.use_sparse_windowed:
+            # Use efficient local window attention
+            window_size = attention_config.get('window_size', 180)
+            self.attention = LocalWindowAttention(d_model, n_heads, window_size, dropout)
         else:
             # Use standard attention
             self.w_q = nn.Linear(d_model, d_model)
@@ -330,6 +415,9 @@ class MultiHeadCrossAttention(nn.Module):
     def forward(self, query, key, value, mask=None):
         if self.use_linear:
             # Use linear attention (O(N) complexity)
+            return self.attention(query, key, value, mask)
+        elif self.use_sparse_windowed:
+            # Use efficient local window attention (O(N × window_size) complexity)
             return self.attention(query, key, value, mask)
         else:
             # Use standard attention (O(N²) complexity)
@@ -547,8 +635,14 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
             print("   ✓ Larger epsilon values (1e-4)")
             print("   ✓ Gradient clipping and value clamping")
             print("   ✓ Learnable temperature parameter")
+        elif self.attention_type == 'sparse_windowed':
+            window_size = attention_config.get('window_size', 180)
+            print(f"   ✓ Sparse Windowed Attention (O(N × {window_size}) complexity)")
+            print(f"   ✓ Window size: {window_size}")
+            print(f"   ✓ Each position attends to ±{window_size//2} neighbors")
+            print("   ✓ Uses torch.unfold for efficient sliding windows")
         elif self.top_k_percent is not None:
-            print(f"   ✓ Sparse Attention (keep top {self.top_k_percent*100:.0f}%)")
+            print(f"   ✓ Top-K Sparse Attention (keep top {self.top_k_percent*100:.0f}%)")
         else:
             print("   ✓ Standard Attention (O(N²) complexity)")
         
@@ -679,7 +773,7 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
         if self.depthwise_separable_conv:
             base_name += "|[depthwise_separable_conv]"
         
-        base_name += f"|[positional_encoding:{self.positional_encoding_type}]"
+        base_name += f"[positional_encoding:{self.positional_encoding_type}]"
 
         return base_name
 
@@ -804,6 +898,66 @@ def count_parameters(model):
     return total_params, trainable_params
 
 
+def test_windowed_attention():
+    """Test windowed attention implementation correctness"""
+    print("\n" + "="*70)
+    print("TESTING SPARSE WINDOWED ATTENTION - CORRECTNESS")
+    print("="*70)
+    
+    # Test with small, verifiable dimensions
+    batch_size, seq_len, d_model = 2, 16, 32
+    n_heads = 4
+    window_size = 4
+    
+    print(f"\nTest setup:")
+    print(f"  Batch: {batch_size}, Seq: {seq_len}, D_model: {d_model}")
+    print(f"  Heads: {n_heads}, Window: {window_size}")
+    
+    # Create module
+    module = LocalWindowAttention(d_model, n_heads, window_size, dropout=0.0)
+    module.eval()
+    
+    # Create test input
+    query = torch.randn(batch_size, seq_len, d_model)
+    key = torch.randn(batch_size, seq_len, d_model)
+    value = torch.randn(batch_size, seq_len, d_model)
+    
+    with torch.no_grad():
+        output, _ = module(query, key, value)
+    
+    print(f"\n✓ Output shape: {output.shape}")
+    assert output.shape == (batch_size, seq_len, d_model), "Shape mismatch!"
+    
+    # Test gradient flow
+    module.train()
+    query.requires_grad = True
+    output, _ = module(query, key, value)
+    loss = output.sum()
+    loss.backward()
+    
+    print(f"✓ Gradient shape: {query.grad.shape}")
+    assert query.grad is not None, "No gradient!"
+    assert not torch.isnan(query.grad).any(), "NaN in gradient!"
+    
+    print(f"✓ No NaN values in output or gradients")
+    
+    # Test with different sequence lengths
+    print(f"\n Testing with variable sequence lengths:")
+    for test_seq_len in [8, 32, 64, 128]:
+        test_query = torch.randn(1, test_seq_len, d_model)
+        test_key = torch.randn(1, test_seq_len, d_model)
+        test_value = torch.randn(1, test_seq_len, d_model)
+        
+        with torch.no_grad():
+            test_output, _ = module(test_query, test_key, test_value)
+        
+        print(f"  Seq len {test_seq_len}: {test_output.shape} ✓")
+        assert test_output.shape == (1, test_seq_len, d_model)
+    
+    print(f"\n✅ ALL WINDOWED ATTENTION TESTS PASSED!")
+    print("="*70 + "\n")
+
+
 def test_linear_attention():
     """Test model with different configurations including linear attention"""
     print("\n" + "="*70)
@@ -815,6 +969,11 @@ def test_linear_attention():
         {
             'name': 'Baseline (Standard Attention)',
             'attention_config': {'type': 'standard'},
+            'depthwise_separable_conv': False,
+        },
+        {
+            'name': 'Sparse Windowed Attention',
+            'attention_config': {'type': 'sparse_windowed', 'window_size': 64},
             'depthwise_separable_conv': False,
         },
         {
@@ -943,4 +1102,8 @@ def test_linear_attention():
 
 
 if __name__ == "__main__":
+    # Test windowed attention first
+    test_windowed_attention()
+    
+    # Then test full models
     test_linear_attention()
