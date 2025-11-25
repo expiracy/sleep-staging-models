@@ -22,7 +22,7 @@ model:
   depthwise_separable_conv: false
 
   attention:
-    type: xformers  
+    type: sdpa
 
 windowing:
   window_epochs: 180
