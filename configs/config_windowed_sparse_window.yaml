@@ -23,7 +23,7 @@ model:
 
   attention:
     type: sparse_windowed  
-    window_size: 36
+    window_size: 18
 
 windowing:
   window_epochs: 180
