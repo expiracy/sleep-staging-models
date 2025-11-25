@@ -278,6 +278,9 @@ class SleepPPGNet(nn.Module):
 
         self.model_type = ModelType.PPG_ONLY
 
+    def get_name(self):
+        return "SleepPPGNet"
+
     def forward(self, x):
         x = self.resconv_blocks(x)
 
