@@ -473,7 +473,8 @@ class LocalGlobalAttention(nn.Module):
     
     def forward(self, query, key, value, mask=None):
         """
-        Efficient implementation that never computes full attention matrix.
+        FAST vectorized implementation - no Python loops!
+        Uses sliding window convolution for local attention + batched ops for global.
         
         Args:
             query: (batch, seq_len, d_model)
@@ -500,73 +501,79 @@ class LocalGlobalAttention(nn.Module):
             if global_positions and global_positions[-1] != seq_len - 1:
                 global_positions.append(seq_len - 1)
         
-        global_set = set(global_positions)
-        num_global = len(global_positions)
-        
-        # Separate regular and global tokens
-        regular_positions = [i for i in range(seq_len) if i not in global_set]
-        num_regular = len(regular_positions)
-        
         half_window = self.window_size // 2
         
-        # Initialize output tensor
-        context = torch.zeros(batch_size, self.n_heads, seq_len, self.d_k, 
-                            device=Q.device, dtype=Q.dtype)
+        # ==================== LOCAL WINDOW ATTENTION (VECTORIZED) ====================
+        # Use unfold to create sliding windows - fully vectorized!
         
-        # ==================== PROCESS REGULAR TOKENS ====================
-        # Regular tokens attend to: local window + all global tokens
-        # This is O(n_regular × (window_size + num_global))
+        # Pad K and V for windowing
+        K_padded = F.pad(K, (0, 0, half_window, half_window))  # Pad sequence dimension
+        V_padded = F.pad(V, (0, 0, half_window, half_window))
         
-        if num_regular > 0:
-            for i in regular_positions:
-                # Get query for this position
-                q_i = Q[:, :, i:i+1, :]  # (batch, heads, 1, d_k)
-                
-                # Determine local window indices
-                left = max(0, i - half_window)
-                right = min(key_len, i + half_window + 1)
-                local_indices = list(range(left, right))
-                
-                # Combine local + global indices (global_positions already sorted)
-                attend_indices = sorted(set(local_indices + global_positions))
-                
-                # Gather K, V for these positions
-                attend_tensor = torch.tensor(attend_indices, device=K.device, dtype=torch.long)
-                k_attend = K[:, :, attend_tensor, :]  # (batch, heads, attend_len, d_k)
-                v_attend = V[:, :, attend_tensor, :]
-                
-                # Compute attention scores
-                scores_i = torch.matmul(q_i, k_attend.transpose(-2, -1)) / math.sqrt(self.d_k)
-                # Shape: (batch, heads, 1, attend_len)
-                
-                # Softmax
-                attn_i = F.softmax(scores_i, dim=-1)
-                attn_i = self.dropout(attn_i)
-                
-                # Apply attention to values
-                context_i = torch.matmul(attn_i, v_attend)  # (batch, heads, 1, d_k)
-                context[:, :, i, :] = context_i.squeeze(2)
+        # Extract sliding windows: (batch, heads, seq_len, window_size, d_k)
+        K_windows = K_padded.unfold(2, self.window_size, 1).permute(0, 1, 2, 4, 3)
+        V_windows = V_padded.unfold(2, self.window_size, 1).permute(0, 1, 2, 4, 3)
         
-        # ==================== PROCESS GLOBAL TOKENS ====================
-        # Global tokens attend to EVERYTHING
-        # This is O(num_global × n) but num_global << n (typically n/40)
+        # Compute local attention scores for ALL positions at once
+        Q_expanded = Q.unsqueeze(3)  # (batch, heads, seq_len, 1, d_k)
+        local_scores = torch.matmul(Q_expanded, K_windows.transpose(-2, -1)).squeeze(3)
+        # Shape: (batch, heads, seq_len, window_size)
+        local_scores = local_scores / math.sqrt(self.d_k)
         
-        if num_global > 0:
-            for g_idx in global_positions:
-                # Get query for this global token
-                q_g = Q[:, :, g_idx:g_idx+1, :]  # (batch, heads, 1, d_k)
-                
-                # Attend to ALL positions (this is ok because there are few global tokens)
-                scores_g = torch.matmul(q_g, K.transpose(-2, -1)) / math.sqrt(self.d_k)
-                # Shape: (batch, heads, 1, key_len)
-                
-                # Softmax
-                attn_g = F.softmax(scores_g, dim=-1)
-                attn_g = self.dropout(attn_g)
-                
-                # Apply attention to values
-                context_g = torch.matmul(attn_g, V)  # (batch, heads, 1, d_k)
-                context[:, :, g_idx, :] = context_g.squeeze(2)
+        # ==================== ADD GLOBAL ATTENTION ====================
+        # Global positions attend to all, and all attend to global positions
+        
+        if len(global_positions) > 0:
+            global_tensor = torch.tensor(global_positions, device=K.device, dtype=torch.long)
+            
+            # Extract global K, V: (batch, heads, num_global, d_k)
+            K_global = K[:, :, global_tensor, :]
+            V_global = V[:, :, global_tensor, :]
+            
+            # All queries attend to global keys
+            global_scores = torch.matmul(Q, K_global.transpose(-2, -1)) / math.sqrt(self.d_k)
+            # Shape: (batch, heads, seq_len, num_global)
+            
+            # Concatenate local + global scores
+            combined_scores = torch.cat([local_scores, global_scores], dim=-1)
+            # Shape: (batch, heads, seq_len, window_size + num_global)
+            
+            # Softmax over combined
+            attn_weights = F.softmax(combined_scores, dim=-1)
+            attn_weights = self.dropout(attn_weights)
+            
+            # Split attention weights back
+            local_attn = attn_weights[:, :, :, :self.window_size]
+            global_attn = attn_weights[:, :, :, self.window_size:]
+            
+            # Apply local attention
+            local_attn_expanded = local_attn.unsqueeze(-1)  # (batch, heads, seq_len, window_size, 1)
+            local_context = (local_attn_expanded * V_windows).sum(dim=3)
+            # Shape: (batch, heads, seq_len, d_k)
+            
+            # Apply global attention
+            global_context = torch.matmul(global_attn, V_global)
+            # Shape: (batch, heads, seq_len, d_k)
+            
+            # Combine
+            context = local_context + global_context
+            
+            # Special handling for global tokens - they need full attention
+            Q_global = Q[:, :, global_tensor, :]  # (batch, heads, num_global, d_k)
+            global_full_scores = torch.matmul(Q_global, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+            global_full_attn = F.softmax(global_full_scores, dim=-1)
+            global_full_attn = self.dropout(global_full_attn)
+            global_full_context = torch.matmul(global_full_attn, V)
+            # Replace context for global positions
+            context[:, :, global_tensor, :] = global_full_context
+            
+        else:
+            # No global tokens - just local attention
+            attn_weights = F.softmax(local_scores, dim=-1)
+            attn_weights = self.dropout(attn_weights)
+            
+            attn_weights_expanded = attn_weights.unsqueeze(-1)
+            context = (attn_weights_expanded * V_windows).sum(dim=3)
         
         # Reshape and output projection
         context = context.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
