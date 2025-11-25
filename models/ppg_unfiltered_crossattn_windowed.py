@@ -164,6 +164,8 @@ class XFormersAttention(nn.Module):
         super(XFormersAttention, self).__init__()
         
         assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
+
+        print("  Using xFormers Memory-Efficient Attention")
         
         self.d_model = d_model
         self.n_heads = n_heads
@@ -493,6 +495,9 @@ class MultiHeadCrossAttention(nn.Module):
             return self.attention(query, key, value, mask)
         elif self.use_sparse_windowed:
             # Use efficient local window attention (O(N × window_size) complexity)
+            return self.attention(query, key, value, mask)
+        elif self.use_xformers:
+            # Use xFormers memory-efficient attention
             return self.attention(query, key, value, mask)
         else:
             # Use standard attention (O(N²) complexity)
