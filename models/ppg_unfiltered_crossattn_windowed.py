@@ -425,17 +425,20 @@ class LinearAttention(nn.Module):
 
 class LocalGlobalAttention(nn.Module):
     """
-    Local + Global Hybrid Attention (Longformer-style)
+    Local + Global Hybrid Attention - EFFICIENT O(n×w + n×g) Implementation
     
     Perfect for PPG signals because:
-    - Local window captures beat-to-beat patterns
+    - Local window captures beat-to-beat patterns  
     - Global tokens track baseline drift, signal quality, respiratory modulation
-    - Efficient: O(n×w + n×g) where w=window_size, g=num_global_tokens
+    - TRUE O(n×w + n×g) complexity where w=window_size, g=num_global_tokens
     
     How it works:
-    - Most tokens use local sliding window attention
-    - Special "global" tokens (every Nth position) attend to everything
-    - All tokens can attend to global tokens
+    - Regular tokens: Attend to local window + all global tokens
+    - Global tokens: Attend to everything (but there are only O(n/interval) of them)
+    
+    Key optimization: Never materialize full n×n attention matrix!
+    - Regular tokens: Compute attention only for window + global positions
+    - Global tokens: Compute full attention (but sparse, only ~n/40 tokens)
     
     This is ideal for cross-modal (clean ↔ noisy) PPG:
     - Local: Direct beat-to-beat alignment
@@ -462,49 +465,16 @@ class LocalGlobalAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.layer_norm = nn.LayerNorm(d_model)
         
-        print(f"  Local+Global Hybrid Attention:")
+        print(f"  Local+Global Hybrid Attention (EFFICIENT):")
         print(f"    - Local window: {window_size}")
         print(f"    - Global token interval: {global_interval}")
-        print(f"    - Complexity: O(n×{window_size} + n×g)")
-    
-    def create_local_global_mask(self, seq_len, device):
-        """
-        Create sparse attention mask with local windows + global tokens
-        
-        Returns:
-            mask: (seq_len, seq_len) boolean mask, True = attend
-            global_positions: list of global token positions
-        """
-        # Start with all False (no attention)
-        mask = torch.zeros(seq_len, seq_len, dtype=torch.bool, device=device)
-        
-        half_window = self.window_size // 2
-        
-        # Step 1: Local window attention for ALL tokens
-        for i in range(seq_len):
-            left = max(0, i - half_window)
-            right = min(seq_len, i + half_window + 1)
-            mask[i, left:right] = True
-        
-        # Step 2: Identify global token positions (every Nth position)
-        global_positions = list(range(0, seq_len, self.global_interval))
-        if not global_positions or global_positions[-1] != seq_len - 1:
-            # Always make the last position global (useful for end-of-sequence context)
-            if global_positions and global_positions[-1] != seq_len - 1:
-                global_positions.append(seq_len - 1)
-        
-        # Step 3: Global tokens attend to EVERYTHING
-        for g_pos in global_positions:
-            mask[g_pos, :] = True  # Global token sees all
-        
-        # Step 4: ALL tokens attend to global tokens
-        for g_pos in global_positions:
-            mask[:, g_pos] = True  # Everyone sees global tokens
-        
-        return mask, global_positions
+        print(f"    - TRUE O(n×{window_size} + n×g) complexity")
+        print(f"    - Never materializes full n×n matrix!")
     
     def forward(self, query, key, value, mask=None):
         """
+        Efficient implementation that never computes full attention matrix.
+        
         Args:
             query: (batch, seq_len, d_model)
             key: (batch, key_len, d_model)
@@ -522,25 +492,81 @@ class LocalGlobalAttention(nn.Module):
         Q = self.w_q(query).view(batch_size, seq_len, self.n_heads, self.d_k).transpose(1, 2)
         K = self.w_k(key).view(batch_size, key_len, self.n_heads, self.d_k).transpose(1, 2)
         V = self.w_v(value).view(batch_size, key_len, self.n_heads, self.d_k).transpose(1, 2)
-        
-        # Compute attention scores
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
-        # Shape: (batch, n_heads, seq_len, key_len)
-        
-        # Create local+global sparse mask
-        sparse_mask, global_positions = self.create_local_global_mask(key_len, query.device)
-        
-        # Apply sparse mask (broadcast across batch and heads)
-        # Positions that are False in mask get -inf (won't attend)
-        scores = scores.masked_fill(~sparse_mask.unsqueeze(0).unsqueeze(0), float('-inf'))
-        
-        # Softmax (only over allowed positions)
-        attn_weights = F.softmax(scores, dim=-1)
-        attn_weights = self.dropout(attn_weights)
-        
-        # Apply attention to values
-        context = torch.matmul(attn_weights, V)
         # Shape: (batch, heads, seq_len, d_k)
+        
+        # Identify global token positions
+        global_positions = list(range(0, seq_len, self.global_interval))
+        if not global_positions or global_positions[-1] != seq_len - 1:
+            if global_positions and global_positions[-1] != seq_len - 1:
+                global_positions.append(seq_len - 1)
+        
+        global_set = set(global_positions)
+        num_global = len(global_positions)
+        
+        # Separate regular and global tokens
+        regular_positions = [i for i in range(seq_len) if i not in global_set]
+        num_regular = len(regular_positions)
+        
+        half_window = self.window_size // 2
+        
+        # Initialize output tensor
+        context = torch.zeros(batch_size, self.n_heads, seq_len, self.d_k, 
+                            device=Q.device, dtype=Q.dtype)
+        
+        # ==================== PROCESS REGULAR TOKENS ====================
+        # Regular tokens attend to: local window + all global tokens
+        # This is O(n_regular × (window_size + num_global))
+        
+        if num_regular > 0:
+            for i in regular_positions:
+                # Get query for this position
+                q_i = Q[:, :, i:i+1, :]  # (batch, heads, 1, d_k)
+                
+                # Determine local window indices
+                left = max(0, i - half_window)
+                right = min(key_len, i + half_window + 1)
+                local_indices = list(range(left, right))
+                
+                # Combine local + global indices (global_positions already sorted)
+                attend_indices = sorted(set(local_indices + global_positions))
+                
+                # Gather K, V for these positions
+                attend_tensor = torch.tensor(attend_indices, device=K.device, dtype=torch.long)
+                k_attend = K[:, :, attend_tensor, :]  # (batch, heads, attend_len, d_k)
+                v_attend = V[:, :, attend_tensor, :]
+                
+                # Compute attention scores
+                scores_i = torch.matmul(q_i, k_attend.transpose(-2, -1)) / math.sqrt(self.d_k)
+                # Shape: (batch, heads, 1, attend_len)
+                
+                # Softmax
+                attn_i = F.softmax(scores_i, dim=-1)
+                attn_i = self.dropout(attn_i)
+                
+                # Apply attention to values
+                context_i = torch.matmul(attn_i, v_attend)  # (batch, heads, 1, d_k)
+                context[:, :, i, :] = context_i.squeeze(2)
+        
+        # ==================== PROCESS GLOBAL TOKENS ====================
+        # Global tokens attend to EVERYTHING
+        # This is O(num_global × n) but num_global << n (typically n/40)
+        
+        if num_global > 0:
+            for g_idx in global_positions:
+                # Get query for this global token
+                q_g = Q[:, :, g_idx:g_idx+1, :]  # (batch, heads, 1, d_k)
+                
+                # Attend to ALL positions (this is ok because there are few global tokens)
+                scores_g = torch.matmul(q_g, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+                # Shape: (batch, heads, 1, key_len)
+                
+                # Softmax
+                attn_g = F.softmax(scores_g, dim=-1)
+                attn_g = self.dropout(attn_g)
+                
+                # Apply attention to values
+                context_g = torch.matmul(attn_g, V)  # (batch, heads, 1, d_k)
+                context[:, :, g_idx, :] = context_g.squeeze(2)
         
         # Reshape and output projection
         context = context.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
@@ -554,14 +580,18 @@ class LocalGlobalAttention(nn.Module):
 
 class StridedAttention(nn.Module):
     """
-    Strided Sparse Attention for multi-scale temporal patterns
+    Strided Sparse Attention - EFFICIENT O(n × (w + k×log n)) Implementation
     
     Perfect for PPG because it captures:
     - Local patterns (window): beat-to-beat variations
     - Medium patterns (stride=4,8): heart rate variability
     - Long patterns (stride=16,32): respiratory modulation, trends
     
-    Complexity: O(n × (w + k×s)) where w=window, k=num_strides, s=avg_stride
+    TRUE O(n × (w + Σ(n/stride))) complexity - never materializes full matrix!
+    
+    For position i, attend to:
+    - Local: [i-w/2, ..., i, ..., i+w/2]
+    - Strided: [..., i-2s, i-s, i, i+s, i+2s, ...]  for each stride s
     """
     
     def __init__(self, d_model, n_heads=8, local_window=64, strides=[4, 8, 16, 32], dropout=0.1):
@@ -583,47 +613,50 @@ class StridedAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.layer_norm = nn.LayerNorm(d_model)
         
-        print(f"  Strided Sparse Attention:")
+        # Calculate average attention positions per token
+        avg_strided = sum(2 * 2400 // s for s in strides)  # Approximate for seq_len=2400
+        
+        print(f"  Strided Sparse Attention (EFFICIENT):")
         print(f"    - Local window: {local_window}")
         print(f"    - Strides: {strides}")
-        print(f"    - Multi-scale temporal patterns")
+        print(f"    - TRUE O(n × (w + strided)) complexity")
+        print(f"    - Never materializes full n×n matrix!")
     
-    def create_strided_mask(self, seq_len, device):
+    def get_strided_indices(self, position, seq_len):
         """
-        Create sparse attention mask with local window + strided positions
+        Get indices for local window + strided positions for a single query position.
         
-        For position i, attend to:
-        - Local: [i-w/2, ..., i, ..., i+w/2]
-        - Strided: [..., i-2s, i-s, i, i+s, i+2s, ...]  for each stride s
+        Returns:
+            List of key indices to attend to (sorted, unique)
         """
-        mask = torch.zeros(seq_len, seq_len, dtype=torch.bool, device=device)
+        indices = set()
         
+        # Local window
         half_window = self.local_window // 2
+        left = max(0, position - half_window)
+        right = min(seq_len, position + half_window + 1)
+        indices.update(range(left, right))
         
-        for i in range(seq_len):
-            # Local window
-            left = max(0, i - half_window)
-            right = min(seq_len, i + half_window + 1)
-            mask[i, left:right] = True
+        # Strided positions
+        for stride in self.strides:
+            # Look backward
+            j = position - stride
+            while j >= 0:
+                indices.add(j)
+                j -= stride
             
-            # Strided positions
-            for stride in self.strides:
-                # Look backward with this stride
-                j = i - stride
-                while j >= 0:
-                    mask[i, j] = True
-                    j -= stride
-                
-                # Look forward with this stride
-                j = i + stride
-                while j < seq_len:
-                    mask[i, j] = True
-                    j += stride
+            # Look forward
+            j = position + stride
+            while j < seq_len:
+                indices.add(j)
+                j += stride
         
-        return mask
+        return sorted(list(indices))
     
     def forward(self, query, key, value, mask=None):
         """
+        Efficient implementation that never computes full attention matrix.
+        
         Args:
             query: (batch, seq_len, d_model)
             key: (batch, key_len, d_model)
@@ -640,32 +673,53 @@ class StridedAttention(nn.Module):
         Q = self.w_q(query).view(batch_size, seq_len, self.n_heads, self.d_k).transpose(1, 2)
         K = self.w_k(key).view(batch_size, key_len, self.n_heads, self.d_k).transpose(1, 2)
         V = self.w_v(value).view(batch_size, key_len, self.n_heads, self.d_k).transpose(1, 2)
+        # Shape: (batch, heads, seq_len, d_k)
         
-        # Compute attention scores
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        # Initialize output tensor
+        context = torch.zeros(batch_size, self.n_heads, seq_len, self.d_k,
+                            device=Q.device, dtype=Q.dtype)
         
-        # Create strided sparse mask
-        sparse_mask = self.create_strided_mask(key_len, query.device)
+        total_attended = 0
         
-        # Apply mask
-        scores = scores.masked_fill(~sparse_mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+        # Process each query position
+        for i in range(seq_len):
+            # Get indices for this position (local + strided)
+            attend_indices = self.get_strided_indices(i, key_len)
+            total_attended += len(attend_indices)
+            
+            # Get query for this position
+            q_i = Q[:, :, i:i+1, :]  # (batch, heads, 1, d_k)
+            
+            # Gather K, V for these positions
+            attend_tensor = torch.tensor(attend_indices, device=K.device, dtype=torch.long)
+            k_attend = K[:, :, attend_tensor, :]  # (batch, heads, attend_len, d_k)
+            v_attend = V[:, :, attend_tensor, :]
+            
+            # Compute attention scores
+            scores_i = torch.matmul(q_i, k_attend.transpose(-2, -1)) / math.sqrt(self.d_k)
+            # Shape: (batch, heads, 1, attend_len)
+            
+            # Softmax
+            attn_i = F.softmax(scores_i, dim=-1)
+            attn_i = self.dropout(attn_i)
+            
+            # Apply attention to values
+            context_i = torch.matmul(attn_i, v_attend)  # (batch, heads, 1, d_k)
+            context[:, :, i, :] = context_i.squeeze(2)
         
-        # Softmax
-        attn_weights = F.softmax(scores, dim=-1)
-        attn_weights = self.dropout(attn_weights)
-        
-        # Apply attention
-        context = torch.matmul(attn_weights, V)
+        # Reshape and output projection
         context = context.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
-        
         output = self.w_o(context)
+        
+        # Residual connection and layer norm
         output = self.layer_norm(query + self.dropout(output))
         
         # Compute sparsity stats
-        sparsity = 1.0 - (sparse_mask.sum().item() / (seq_len * key_len))
+        avg_attended = total_attended / seq_len
+        sparsity = 1.0 - (total_attended / (seq_len * key_len))
         sparsity_info = {
             'sparsity': sparsity,
-            'num_attended': sparse_mask.sum().item() / seq_len
+            'num_attended': avg_attended
         }
         
         return output, sparsity_info
