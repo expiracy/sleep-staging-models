@@ -23,8 +23,8 @@ model:
 
   attention:
     type: local_global  
-    window_size: 36
-    global_interval: 18
+    window_size: 18
+    global_interval: 36
 
 windowing:
   window_epochs: 180
