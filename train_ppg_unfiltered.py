@@ -116,6 +116,11 @@ class PPGUnfilteredTrainer(CrossAttentionTrainer):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 self.scaler.step(optimizer)
                 self.scaler.update()
+                
+                # Update learning rate (must be after optimizer.step())
+                if scheduler is not None:
+                    scheduler.step()
+                
                 optimizer.zero_grad()
             else:
                 outputs = model(ppg)
@@ -128,6 +133,11 @@ class PPGUnfilteredTrainer(CrossAttentionTrainer):
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
+                
+                # Update learning rate (must be after optimizer.step())
+                if scheduler is not None:
+                    scheduler.step()
+                
                 optimizer.zero_grad()
 
             # Record modality weights
@@ -135,10 +145,6 @@ class PPGUnfilteredTrainer(CrossAttentionTrainer):
             if clean_weight is not None:
                 clean_weights.append(clean_weight.mean().item())
                 noisy_weights.append(noisy_weight.mean().item())
-
-            # Update learning rate
-            if scheduler is not None:
-                scheduler.step()
 
             # Statistics
             mask = labels != -1

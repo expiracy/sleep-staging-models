@@ -171,6 +171,11 @@ class CrossAttentionTrainerDDP:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 self.scaler.step(optimizer)
                 self.scaler.update()
+                
+                # Update learning rate (must be after optimizer.step())
+                if scheduler is not None:
+                    scheduler.step()
+                
                 optimizer.zero_grad()
 
             else:
@@ -184,11 +189,12 @@ class CrossAttentionTrainerDDP:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
+                
+                # Update learning rate (must be after optimizer.step())
+                if scheduler is not None:
+                    scheduler.step()
+                
                 optimizer.zero_grad()
-
-            # Update learning rate
-            if scheduler is not None:
-                scheduler.step()
 
             # Statistics
             mask = labels != -1
