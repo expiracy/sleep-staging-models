@@ -219,7 +219,7 @@ class LocalWindowAttention(nn.Module):
         
         print(f" Sparse window attention (window size: {window_size})")
     
-    def forward(self, query, key, value):
+    def forward(self, query, key, value, mask=None):
         batch_size, seq_len, _ = query.shape
         
         # Project and reshape
@@ -423,6 +423,252 @@ class LinearAttention(nn.Module):
         # Linear attention doesn't produce explicit attention weights
         return output, None
 
+class LocalGlobalAttention(nn.Module):
+    """
+    Local + Global Hybrid Attention (Longformer-style)
+    
+    Perfect for PPG signals because:
+    - Local window captures beat-to-beat patterns
+    - Global tokens track baseline drift, signal quality, respiratory modulation
+    - Efficient: O(n×w + n×g) where w=window_size, g=num_global_tokens
+    
+    How it works:
+    - Most tokens use local sliding window attention
+    - Special "global" tokens (every Nth position) attend to everything
+    - All tokens can attend to global tokens
+    
+    This is ideal for cross-modal (clean ↔ noisy) PPG:
+    - Local: Direct beat-to-beat alignment
+    - Global: Mediate long-range drift and quality differences
+    """
+    
+    def __init__(self, d_model, n_heads=8, window_size=80, global_interval=40, dropout=0.1):
+        super(LocalGlobalAttention, self).__init__()
+        
+        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
+        assert window_size % 2 == 0, "window_size should be even for symmetric windows"
+        
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.d_k = d_model // n_heads
+        self.window_size = window_size
+        self.global_interval = global_interval
+        
+        self.w_q = nn.Linear(d_model, d_model)
+        self.w_k = nn.Linear(d_model, d_model)
+        self.w_v = nn.Linear(d_model, d_model)
+        self.w_o = nn.Linear(d_model, d_model)
+        
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(d_model)
+        
+        print(f"  Local+Global Hybrid Attention:")
+        print(f"    - Local window: {window_size}")
+        print(f"    - Global token interval: {global_interval}")
+        print(f"    - Complexity: O(n×{window_size} + n×g)")
+    
+    def create_local_global_mask(self, seq_len, device):
+        """
+        Create sparse attention mask with local windows + global tokens
+        
+        Returns:
+            mask: (seq_len, seq_len) boolean mask, True = attend
+            global_positions: list of global token positions
+        """
+        # Start with all False (no attention)
+        mask = torch.zeros(seq_len, seq_len, dtype=torch.bool, device=device)
+        
+        half_window = self.window_size // 2
+        
+        # Step 1: Local window attention for ALL tokens
+        for i in range(seq_len):
+            left = max(0, i - half_window)
+            right = min(seq_len, i + half_window + 1)
+            mask[i, left:right] = True
+        
+        # Step 2: Identify global token positions (every Nth position)
+        global_positions = list(range(0, seq_len, self.global_interval))
+        if not global_positions or global_positions[-1] != seq_len - 1:
+            # Always make the last position global (useful for end-of-sequence context)
+            if global_positions and global_positions[-1] != seq_len - 1:
+                global_positions.append(seq_len - 1)
+        
+        # Step 3: Global tokens attend to EVERYTHING
+        for g_pos in global_positions:
+            mask[g_pos, :] = True  # Global token sees all
+        
+        # Step 4: ALL tokens attend to global tokens
+        for g_pos in global_positions:
+            mask[:, g_pos] = True  # Everyone sees global tokens
+        
+        return mask, global_positions
+    
+    def forward(self, query, key, value, mask=None):
+        """
+        Args:
+            query: (batch, seq_len, d_model)
+            key: (batch, key_len, d_model)
+            value: (batch, key_len, d_model)
+            mask: optional additional mask (not typically used)
+        
+        Returns:
+            output: (batch, seq_len, d_model)
+            global_positions: list of global token positions (for visualization)
+        """
+        batch_size, seq_len, _ = query.shape
+        key_len = key.size(1)
+        
+        # Project and reshape to (batch, heads, seq_len, d_k)
+        Q = self.w_q(query).view(batch_size, seq_len, self.n_heads, self.d_k).transpose(1, 2)
+        K = self.w_k(key).view(batch_size, key_len, self.n_heads, self.d_k).transpose(1, 2)
+        V = self.w_v(value).view(batch_size, key_len, self.n_heads, self.d_k).transpose(1, 2)
+        
+        # Compute attention scores
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        # Shape: (batch, n_heads, seq_len, key_len)
+        
+        # Create local+global sparse mask
+        sparse_mask, global_positions = self.create_local_global_mask(key_len, query.device)
+        
+        # Apply sparse mask (broadcast across batch and heads)
+        # Positions that are False in mask get -inf (won't attend)
+        scores = scores.masked_fill(~sparse_mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+        
+        # Softmax (only over allowed positions)
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        
+        # Apply attention to values
+        context = torch.matmul(attn_weights, V)
+        # Shape: (batch, heads, seq_len, d_k)
+        
+        # Reshape and output projection
+        context = context.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
+        output = self.w_o(context)
+        
+        # Residual connection and layer norm
+        output = self.layer_norm(query + self.dropout(output))
+        
+        return output, global_positions
+
+
+class StridedAttention(nn.Module):
+    """
+    Strided Sparse Attention for multi-scale temporal patterns
+    
+    Perfect for PPG because it captures:
+    - Local patterns (window): beat-to-beat variations
+    - Medium patterns (stride=4,8): heart rate variability
+    - Long patterns (stride=16,32): respiratory modulation, trends
+    
+    Complexity: O(n × (w + k×s)) where w=window, k=num_strides, s=avg_stride
+    """
+    
+    def __init__(self, d_model, n_heads=8, local_window=64, strides=[4, 8, 16, 32], dropout=0.1):
+        super(StridedAttention, self).__init__()
+        
+        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
+        
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.d_k = d_model // n_heads
+        self.local_window = local_window
+        self.strides = strides
+        
+        self.w_q = nn.Linear(d_model, d_model)
+        self.w_k = nn.Linear(d_model, d_model)
+        self.w_v = nn.Linear(d_model, d_model)
+        self.w_o = nn.Linear(d_model, d_model)
+        
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(d_model)
+        
+        print(f"  Strided Sparse Attention:")
+        print(f"    - Local window: {local_window}")
+        print(f"    - Strides: {strides}")
+        print(f"    - Multi-scale temporal patterns")
+    
+    def create_strided_mask(self, seq_len, device):
+        """
+        Create sparse attention mask with local window + strided positions
+        
+        For position i, attend to:
+        - Local: [i-w/2, ..., i, ..., i+w/2]
+        - Strided: [..., i-2s, i-s, i, i+s, i+2s, ...]  for each stride s
+        """
+        mask = torch.zeros(seq_len, seq_len, dtype=torch.bool, device=device)
+        
+        half_window = self.local_window // 2
+        
+        for i in range(seq_len):
+            # Local window
+            left = max(0, i - half_window)
+            right = min(seq_len, i + half_window + 1)
+            mask[i, left:right] = True
+            
+            # Strided positions
+            for stride in self.strides:
+                # Look backward with this stride
+                j = i - stride
+                while j >= 0:
+                    mask[i, j] = True
+                    j -= stride
+                
+                # Look forward with this stride
+                j = i + stride
+                while j < seq_len:
+                    mask[i, j] = True
+                    j += stride
+        
+        return mask
+    
+    def forward(self, query, key, value, mask=None):
+        """
+        Args:
+            query: (batch, seq_len, d_model)
+            key: (batch, key_len, d_model)
+            value: (batch, key_len, d_model)
+        
+        Returns:
+            output: (batch, seq_len, d_model)
+            sparsity_info: dict with sparsity statistics
+        """
+        batch_size, seq_len, _ = query.shape
+        key_len = key.size(1)
+        
+        # Project and reshape
+        Q = self.w_q(query).view(batch_size, seq_len, self.n_heads, self.d_k).transpose(1, 2)
+        K = self.w_k(key).view(batch_size, key_len, self.n_heads, self.d_k).transpose(1, 2)
+        V = self.w_v(value).view(batch_size, key_len, self.n_heads, self.d_k).transpose(1, 2)
+        
+        # Compute attention scores
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        
+        # Create strided sparse mask
+        sparse_mask = self.create_strided_mask(key_len, query.device)
+        
+        # Apply mask
+        scores = scores.masked_fill(~sparse_mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+        
+        # Softmax
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        
+        # Apply attention
+        context = torch.matmul(attn_weights, V)
+        context = context.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
+        
+        output = self.w_o(context)
+        output = self.layer_norm(query + self.dropout(output))
+        
+        # Compute sparsity stats
+        sparsity = 1.0 - (sparse_mask.sum().item() / (seq_len * key_len))
+        sparsity_info = {
+            'sparsity': sparsity,
+            'num_attended': sparse_mask.sum().item() / seq_len
+        }
+        
+        return output, sparsity_info
 
 class MultiHeadCrossAttention(nn.Module):
     """Multi-Head Cross-Attention with optional sparse attention or linear attention"""
@@ -437,20 +683,43 @@ class MultiHeadCrossAttention(nn.Module):
         attention_config = attention_config or {'type': 'standard'}
         self.attention_type = attention_config.get('type', 'standard')
         self.top_k_percent = attention_config.get('top_k_percent', None)
+        
+        # Attention type flags
         self.use_linear = self.attention_type == 'linear'
         self.use_sparse_windowed = self.attention_type == 'sparse_windowed'
-        self.use_spda = self.attention_type == 'sdpa'
+        self.use_local_global = self.attention_type == 'local_global'
+        self.use_strided = self.attention_type == 'strided'
+        self.use_sdpa = self.attention_type == 'sdpa'
 
         if self.use_linear:
             # Use linear attention
             self.attention = LinearAttention(d_model, n_heads, dropout)
+            
         elif self.use_sparse_windowed:
             # Use efficient local window attention
-            window_size = attention_config.get('window_size', 180)
+            window_size = attention_config.get('window_size', 36)
             self.attention = LocalWindowAttention(d_model, n_heads, window_size, dropout)
-        elif self.use_spda:
+            
+        elif self.use_local_global:
+            # Use local + global hybrid attention
+            window_size = attention_config.get('window_size', 36)
+            global_interval = attention_config.get('global_interval', 18)
+            self.attention = LocalGlobalAttention(
+                d_model, n_heads, window_size, global_interval, dropout
+            )
+            
+        elif self.use_strided:
+            # Use strided sparse attention
+            local_window = attention_config.get('local_window', 18)
+            strides = attention_config.get('strides', [4, 36])
+            self.attention = StridedAttention(
+                d_model, n_heads, local_window, strides, dropout
+            )
+            
+        elif self.use_sdpa:
             # Use PyTorch Scaled Dot Product Attention
             self.attention = SDPAAttention(d_model, n_heads, dropout)
+            
         else:
             # Use standard attention
             self.w_q = nn.Linear(d_model, d_model)
@@ -465,14 +734,8 @@ class MultiHeadCrossAttention(nn.Module):
                 print(f"  Using Top-K Attention (keep top {self.top_k_percent*100:.0f}%)")
 
     def forward(self, query, key, value, mask=None):
-        if self.use_linear:
-            # Use linear attention (O(N) complexity)
-            return self.attention(query, key, value, mask)
-        elif self.use_sparse_windowed:
-            # Use efficient local window attention (O(N × window_size) complexity)
-            return self.attention(query, key, value, mask)
-        elif self.use_spda:
-            # Use xFormers memory-efficient attention
+        if self.use_linear or self.use_sparse_windowed or self.use_local_global or self.use_strided or self.use_sdpa:
+            # Use specialized attention module
             return self.attention(query, key, value, mask)
         else:
             # Use standard attention (O(N²) complexity)

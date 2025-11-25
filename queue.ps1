@@ -11,7 +11,7 @@ Set-Location C:\Users\james\Documents\repos\ppg-sleep-stage-classifier\src\sleep
 # TODO do this script with bigger window
 # python train_ppg_unfiltered_windowed.py --config configs/config_windowed_sparse_window.yaml
 
-python train_ppg_unfiltered_windowed.py --config configs/config_windowed_sdpaa.yaml 
+python train_ppg_unfiltered_windowed.py --config configs/config_windowed_local_global.yaml 
 
 # python train_ppg_unfiltered_windowed.py --config configs/config_windowed_sparse_window.yaml 
 

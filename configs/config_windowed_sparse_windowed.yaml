@@ -18,11 +18,11 @@ model:
   n_heads: 8
   n_fusion_blocks: 3
   dropout: 0.1
-  positional_encoding: learned
+  positional_encoding: sinusoidal
   depthwise_separable_conv: false
 
   attention:
-    type: sinusoidal  
+    type: sparse_windowed  
     window_size: 72
 
 windowing:

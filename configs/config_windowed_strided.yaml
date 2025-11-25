@@ -1,0 +1,42 @@
+# Windowed Cross-Attention Training with Linear Attention
+# Linear attention provides O(N) complexity instead of O(N²)
+data:
+  ppg_file: "../../data/mesa_processed/mesa_ppg_with_labels.h5"
+  ecg_file: "../../data/mesa_processed/mesa_real_ecg.h5"
+  index_file: "../../data/mesa_processed/mesa_subject_index.h5"
+  num_workers: 4
+
+training:
+  batch_size: 2
+  num_epochs: 50
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  patience: 15
+
+model:
+  d_model: 256
+  n_heads: 8
+  n_fusion_blocks: 3
+  dropout: 0.1
+  positional_encoding: sinusoidal
+  depthwise_separable_conv: false
+
+  attention:
+    type: strided  
+    strides: [4, 18]
+    local_window: 18
+
+windowing:
+  window_epochs: 180
+  overlap_percent: 20
+
+output:
+  save_dir: "../../outputs"
+  save_frequency: 5
+
+gpu:
+  memory_fraction: 0.9
+
+use_amp: true
+
+gradient_accumulation_steps: 2
