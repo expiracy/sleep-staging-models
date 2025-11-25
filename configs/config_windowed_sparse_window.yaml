@@ -7,7 +7,7 @@ data:
   num_workers: 4
 
 training:
-  batch_size: 4
+  batch_size: 2
   num_epochs: 50
   learning_rate: 0.0001
   weight_decay: 0.00001
@@ -18,12 +18,12 @@ model:
   n_heads: 8
   n_fusion_blocks: 3
   dropout: 0.1
-  positional_encoding: sinusoidal  
+  positional_encoding: learned
   depthwise_separable_conv: false
 
   attention:
-    type: sparse_windowed  
-    window_size: 18
+    type: sinusoidal  
+    window_size: 72
 
 windowing:
   window_epochs: 180

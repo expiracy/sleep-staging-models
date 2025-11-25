@@ -18,7 +18,7 @@ model:
   n_heads: 8
   n_fusion_blocks: 3
   dropout: 0.1
-  positional_encoding: sinusoidal  
+  positional_encoding: sinusoidal
   depthwise_separable_conv: false
 
   attention:
