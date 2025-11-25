@@ -6,4 +6,8 @@
 
 Set-Location C:\Users\james\Documents\repos\ppg-sleep-stage-classifier\src\sleep_staging_models
 
-python train_ppg_unfiltered.py --config configs/config_ppg_unfiltered.yaml --runs 5
+python train_ppg_unfiltered_windowed.py --config configs/config_windowed_sparse_window.yaml --positional_encoding sinusoidal 
+
+# python train_ppg_unfiltered_windowed.py --config configs/config_windowed.yaml --use_sparse
+python train_ppg_unfiltered_windowed.py --config configs/config_windowed_linear.yaml --positional_encoding sinusoidal 
+
