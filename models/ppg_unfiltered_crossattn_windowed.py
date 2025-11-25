@@ -131,7 +131,9 @@ class LearnedPositionalEncoding(nn.Module):
         """
         batch_size, d_model, seq_len = x.shape
         
+        # fallback to interpolation if seq_len > max_len
         if seq_len > self.max_len:
+            print("  Warning: Interpolating learned positional encodings")
             pos_enc = F.interpolate(
                 self.pos_embedding, 
                 size=seq_len, 
@@ -145,11 +147,6 @@ class LearnedPositionalEncoding(nn.Module):
 
 
 class LocalWindowAttention(nn.Module):
-    """
-    TRUE O(N × window_size) local window attention - both time AND memory efficient.
-    Fully vectorized with no Python loops.
-    """
-    
     def __init__(self, d_model, n_heads=8, window_size=64, dropout=0.1):
         super(LocalWindowAttention, self).__init__()
         
@@ -169,9 +166,9 @@ class LocalWindowAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.layer_norm = nn.LayerNorm(d_model)
         
-        print(f"  ✓ TRUE O(N×{window_size}) Vectorized Local Window Attention")
+        print(f" Sparse window attention (window size: {window_size})")
     
-    def forward(self, query, key, value, mask=None):
+    def forward(self, query, key, value):
         batch_size, seq_len, _ = query.shape
         
         # Project and reshape
@@ -616,35 +613,27 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
         self.attention_config = attention_config
         self.attention_type = attention_config['type']
         self.top_k_percent = attention_config.get('top_k_percent', None)
-        
-        # Determine if using linear attention
-        use_linear_attention = self.attention_type == 'linear'
-        
+                
         # Print configuration
         print("\n" + "="*70)
-        print("PPG UNFILTERED WINDOWED CROSS-ATTENTION MODEL - STABLE VERSION")
+        print("PPG UNFILTERED WINDOWED CROSS-ATTENTION MODEL")
         print("="*70)
         
         # Attention type
-        print(f"\n🔹 Attention Configuration:")
-        print(f"   Type: {self.attention_type}")
-        if use_linear_attention:
-            print(f"   ✓ Linear Attention (O(N) complexity)")
-            print("   ✓ STABLE: Fixed NaN issues")
-            print("   ✓ ReLU feature map instead of ELU")
-            print("   ✓ Larger epsilon values (1e-4)")
-            print("   ✓ Gradient clipping and value clamping")
-            print("   ✓ Learnable temperature parameter")
+        print(f"\nAttention Configuration:")
+        print(f"  Type: {self.attention_type}")
+        if self.attention_type == 'linear':
+            print(f"  Linear Attention")
         elif self.attention_type == 'sparse_windowed':
             window_size = attention_config.get('window_size', 180)
-            print(f"   ✓ Sparse Windowed Attention (O(N × {window_size}) complexity)")
-            print(f"   ✓ Window size: {window_size}")
-            print(f"   ✓ Each position attends to ±{window_size//2} neighbors")
-            print("   ✓ Uses torch.unfold for efficient sliding windows")
-        elif self.top_k_percent is not None:
-            print(f"   ✓ Top-K Sparse Attention (keep top {self.top_k_percent*100:.0f}%)")
+            attention_config['window_size'] = window_size # Ensure window_size is set
+            print(f"  Sparse Windowed Attention (window size: {window_size})")
         else:
-            print("   ✓ Standard Attention (O(N²) complexity)")
+            print("  Standard Attention")
+
+        if self.top_k_percent is not None:
+            print(f"  Using Top-K Attention (keep top {self.top_k_percent*100:.0f}%)")
+
         
         # Positional encoding
         print(f"\nPositional Encoding: {positional_encoding.upper()}")
@@ -765,15 +754,18 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
 
     def get_name(self):
         base_name = "PPGUnfilteredWindowedCrossAttention"
-        base_name += "|"
+        base_name += "{"
         for key, value in self.attention_config.items():
             base_name += f"[{key}:{value}]"
         base_name += "}"
         
         if self.depthwise_separable_conv:
-            base_name += "|[DSConv]"
+            base_name += "{{[dw_sep_conv]}}"
         
-        base_name += f"|[PosEnc:{self.positional_encoding_type}]"
+        base_name += f"{{[pos_enc:{self.positional_encoding_type}]}}"
+
+        if self.top_k_percent is not None:
+            base_name += f"{{[top_k:{self.top_k_percent}]}}"
 
         return base_name
 
@@ -1075,30 +1067,7 @@ def test_linear_attention():
             
             if not has_nan_grad:
                 print(f"    ✓ All gradients are valid")
-    
-    print("\n" + "="*70)
-    print("STABILITY IMPROVEMENTS SUMMARY")
-    print("="*70)
-    print("\n✨ Key Fixes Applied:")
-    print("  1. ✓ ReLU feature map instead of ELU + 1")
-    print("  2. ✓ Larger epsilon (1e-4 instead of 1e-6)")
-    print("  3. ✓ Learnable temperature parameter")
-    print("  4. ✓ Gradient and value clipping")
-    print("  5. ✓ Careful weight initialization (gain=0.5)")
-    print("  6. ✓ Q/K scaling before feature map")
-    print("  7. ✓ Denominator clamping")
-    print("  8. ✓ NaN detection and handling")
-    
-    print("\n💡 Training Tips:")
-    print("  • Use gradient clipping (e.g., torch.nn.utils.clip_grad_norm_)")
-    print("  • Start with smaller learning rate (e.g., 1e-4)")
-    print("  • Use mixed precision training (torch.cuda.amp)")
-    print("  • Monitor for NaN loss during training")
-    print("  • Consider learning rate warmup")
-    
-    print("\n" + "=" * 70)
-    print("✅ ALL TESTS PASSED - MODEL IS STABLE")
-    print("=" * 70 + "\n")
+
 
 
 if __name__ == "__main__":
