@@ -223,7 +223,7 @@ class LocalWindowAttention(nn.Module):
         
         return output, None
     
-    
+
 class LinearAttention(nn.Module):
     """
     Linear Attention mechanism with O(N) complexity - NUMERICALLY STABLE VERSION.
@@ -765,15 +765,15 @@ class PPGUnfilteredWindowedCrossAttention(nn.Module):
 
     def get_name(self):
         base_name = "PPGUnfilteredWindowedCrossAttention"
-        base_name += "|attention_config{"
+        base_name += "|"
         for key, value in self.attention_config.items():
             base_name += f"[{key}:{value}]"
         base_name += "}"
         
         if self.depthwise_separable_conv:
-            base_name += "|[depthwise_separable_conv]"
+            base_name += "|[DSConv]"
         
-        base_name += f"[positional_encoding:{self.positional_encoding_type}]"
+        base_name += f"|[PosEnc:{self.positional_encoding_type}]"
 
         return base_name
 
